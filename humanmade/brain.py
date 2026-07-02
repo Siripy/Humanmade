@@ -168,33 +168,36 @@ def _parse_decision(raw: str) -> dict:
 # ----------------------------------------------------------------- brainstem
 
 class ReflexBrain:
-    """Rule-based survival instinct — keeps the body alive without an LLM."""
+    """Rule-based survival instinct — keeps the body alive without an LLM.
 
-    def decide(self, persona: dict, context: str,
-               conversation: list[dict]) -> dict:
-        # crude parse of the vitals baked into context
-        def val(name: str, default: float = 50.0) -> float:
-            m = re.search(rf"{name}[:= ]+([\d.]+)", context, re.IGNORECASE)
-            return float(m.group(1)) if m else default
+    Reads the Body/World state directly (duck-typed) rather than parsing the
+    LLM prompt text, so prompt wording can change without lobotomizing it.
+    Priorities follow Maslow's physiological layer.
+    """
 
-        asleep = "asleep" in context.lower()
+    def decide(self, body, world) -> dict:
+        if body.asleep:
+            if body.energy > 85:
+                return self._d("time to get up", "wake")
+            return self._d("still sleeping", "idle", importance=1.0)
         rules: list[tuple[bool, str, str]] = [
-            (asleep and val("energy") > 85, "wake", "time to get up"),
-            (asleep, "idle", "still sleeping"),
-            (val("bladder", 0) > 75, "toilet", "I really need the bathroom"),
-            (val("bowel", 0) > 75, "toilet", "I need the toilet, now"),
-            (val("hydration") < 30, "drink", "so thirsty"),
-            (val("satiety") < 30, "eat", "I should eat something"),
-            (val("energy") < 20, "sleep", "I can't keep my eyes open"),
-            (val("hygiene") < 30, "shower", "I need a shower"),
-            (val("fun") < 25, "relax", "I need a break"),
+            (body.bladder > 75, "toilet", "I really need the bathroom"),
+            (body.bowel > 75, "toilet", "I need the toilet, now"),
+            (body.hydration < 30, "drink", "so thirsty"),
+            (body.satiety < 30 and world.food_portions > 0,
+             "eat", "I should eat something"),
+            (body.satiety < 30, "drink", "starving, but the fridge is empty — "
+                                         "water will have to do"),
+            (body.energy < 20, "sleep", "I can't keep my eyes open"),
+            (body.hygiene < 30, "shower", "I need a shower"),
+            (body.fun < 25, "relax", "I need a break"),
         ]
         for cond, action, thought in rules:
             if cond:
-                return {"thought": thought, "action": action, "say": None,
-                        "importance": 2.0}
-        return {"thought": "just existing", "action": "idle", "say": None,
-                "importance": 1.0}
+                return self._d(thought, action)
+        return self._d("just existing", "idle", importance=1.0)
 
-    def reflect(self, persona: dict, memories_text: str) -> list[str]:
-        return []
+    @staticmethod
+    def _d(thought: str, action: str, importance: float = 2.0) -> dict:
+        return {"thought": thought, "action": action, "say": None,
+                "importance": importance}

@@ -4,6 +4,13 @@ The agent is never prompted by you. On its own cadence it perceives its body
 and surroundings, retrieves relevant memories, thinks, picks an action, and —
 when it feels like it — speaks first. Your messages just become part of what
 it perceives.
+
+Threading model: all state (body, world, memory, conversation) is guarded by
+`self.lock`; the sim loop and the CLI both go through it. LLM calls are slow,
+so thinking happens on a worker thread against a snapshot of perception — the
+body keeps living while the mind deliberates, and the finished decision is
+applied on the next tick. Only the current life may apply a decision (a
+`_life_id` guard drops thoughts that finish after death or /newlife).
 """
 
 from __future__ import annotations
@@ -11,10 +18,11 @@ from __future__ import annotations
 import json
 import os
 import random
+import threading
 import time
 
 from .body import Body
-from .brain import ACTIONS, BrainError, LLMBrain, ReflexBrain
+from .brain import BrainError, LLMBrain, ReflexBrain
 from .memory import MemoryStream
 from .world import World
 
@@ -31,6 +39,7 @@ ACTION_DURATION = {  # sim-minutes each action occupies
 }
 DECISION_INTERVAL = 30      # sim-minutes between spontaneous thoughts
 SLEEP_CHECK_INTERVAL = 90   # thinks less often while asleep
+RECONNECT_PROBE_CHANCE = 0.15  # odds per reflex thought of probing for the LLM
 
 
 def make_persona(name: str | None = None) -> dict:
@@ -54,6 +63,7 @@ class Human:
         self.on_event = on_event          # callback(text) — narration
         self.on_thought = on_thought      # callback(text) — inner monologue (verbose)
 
+        self.lock = threading.RLock()
         self.memory = MemoryStream(os.path.join(state_dir, "memory.sqlite3"))
         self.body, self.world, self.persona = self._load_state()
 
@@ -67,6 +77,13 @@ class Human:
         self.action_minutes_left = 5.0
         self.minutes_since_decision = 0.0
         self._llm_fail_streak = 0
+
+        # in-flight cognition (see module docstring)
+        self._life_id = 0
+        self._think_seq = 0
+        self._think_thread: threading.Thread | None = None
+        self._think_outcome: dict | None = None
+        self._reflecting = False
 
     # ------------------------------------------------------------ persistence
 
@@ -87,51 +104,75 @@ class Human:
         return body, world, persona
 
     def save(self) -> None:
-        self.memory.set_meta("body", json.dumps(self.body.to_dict()))
-        self.memory.set_meta("world", json.dumps(self.world.to_dict()))
-        self.memory.set_meta("persona", json.dumps(self.persona))
+        with self.lock:
+            self.memory.set_meta("body", json.dumps(self.body.to_dict()))
+            self.memory.set_meta("world", json.dumps(self.world.to_dict()))
+            self.memory.set_meta("persona", json.dumps(self.persona))
 
-    # ------------------------------------------------------------------ input
+    # ------------------------------------------------------- companion inputs
 
     def hear(self, text: str) -> None:
         """Companion said something; the human will notice on its next thought."""
-        self.inbox.append(text)
-        self.body.social = min(100.0, self.body.social + 18)
-        self.memory.add("conversation", f"Companion said: \"{text}\"",
-                        self.body.sim_minutes)
+        with self.lock:
+            self.inbox.append(text)
+            self.body.social = min(100.0, self.body.social + 18)
+            self.memory.add("conversation", f"Companion said: \"{text}\"",
+                            self.body.sim_minutes)
+
+    def restock(self, portions: int = 8) -> int:
+        with self.lock:
+            total = self.world.restock(portions)
+            self.memory.add("event", "My companion restocked the fridge.",
+                            self.body.sim_minutes, importance=6)
+            return total
+
+    def status_report(self) -> list[str]:
+        with self.lock:
+            return self.body.status_lines() + [
+                f"  fridge: {self.world.food_portions} portions"]
+
+    def recent_memories(self, n: int = 15):
+        with self.lock:
+            return self.memory.recent(n)
 
     # ------------------------------------------------------------------- tick
 
     def tick(self, sim_minutes: float) -> None:
         """Advance the person's life by `sim_minutes` of simulated time."""
-        if not self.body.alive:
-            return
+        with self.lock:
+            if not self.body.alive:
+                return
 
-        events = self.body.tick(sim_minutes, self.current_action)
-        for e in events:
-            self.on_event(e)
-            self.memory.add("event", e, self.body.sim_minutes,
-                            importance=9 if "DIED" in e else 7)
-        if not self.body.alive:
-            self._die()
-            return
+            events = self.body.tick(sim_minutes, self.current_action)
+            for e in events:
+                self.on_event(e)
+                self.memory.add("event", e, self.body.sim_minutes,
+                                importance=9 if "DIED" in e else 7)
+            if not self.body.alive:
+                self._die()
+                return
 
-        self.action_minutes_left -= sim_minutes
-        self.minutes_since_decision += sim_minutes
+            self.action_minutes_left -= sim_minutes
+            self.minutes_since_decision += sim_minutes
 
-        interval = SLEEP_CHECK_INTERVAL if self.body.asleep else DECISION_INTERVAL
-        urgent = self.body.urgent_needs()
-        must_think = (
-            self.inbox
-            or self.minutes_since_decision >= interval
-            or (self.action_minutes_left <= 0 and not self.body.asleep)
-            or (urgent and self.minutes_since_decision >= 10)
-        )
-        if must_think:
-            self._think()
+            self._collect_thought()
 
-        if self.memory.reflection_due() and not self.body.asleep:
-            self._reflect()
+            if self._think_thread is None and self.body.alive:
+                interval = (SLEEP_CHECK_INTERVAL if self.body.asleep
+                            else DECISION_INTERVAL)
+                urgent = self.body.urgent_needs()
+                must_think = (
+                    self.inbox
+                    or self.minutes_since_decision >= interval
+                    or (self.action_minutes_left <= 0 and not self.body.asleep)
+                    or (urgent and self.minutes_since_decision >= 10)
+                )
+                if must_think:
+                    self._begin_think()
+
+            if (self.memory.reflection_due() and not self.body.asleep
+                    and not self._reflecting):
+                self._begin_reflection()
 
     # ---------------------------------------------------------------- thought
 
@@ -167,34 +208,80 @@ class Human:
         lines.append("What do you think, do, and (optionally) say?")
         return "\n".join(lines)
 
-    def _think(self) -> None:
+    def _begin_think(self) -> None:
+        """Snapshot perception and start deciding. Reflex decisions are instant;
+        LLM decisions run on a worker thread and land on a later tick."""
         self.minutes_since_decision = 0.0
         perception = self._perception()
         heard = bool(self.inbox)
         self.inbox.clear()
 
-        decision = None
-        if self.llm_online:
-            try:
-                decision = self.llm.decide(self.persona, perception, self.conversation)
-                self._llm_fail_streak = 0
-            except BrainError as e:
-                self._llm_fail_streak += 1
-                if self._llm_fail_streak == 1:
-                    self.on_event(f"(mind fog: {e})")
-                if self._llm_fail_streak >= 3:
-                    self.llm_online = False
-                    self.on_event("(the higher mind went dark — survival instinct "
-                                  "takes over; will retry the LLM periodically)")
-        else:
-            # occasionally retry the LLM
-            if random.random() < 0.15 and self.llm.available():
-                self.llm_online = True
-                self._llm_fail_streak = 0
-                self.on_event("(the higher mind flickers back online)")
-        if decision is None:
-            decision = self.reflex.decide(self.persona, perception, self.conversation)
+        if not self.llm_online:
+            if random.random() < RECONNECT_PROBE_CHANCE:
+                self._spawn_reconnect_probe()
+            self._apply_decision(self.reflex.decide(self.body, self.world),
+                                 perception, heard)
+            return
 
+        life_id = self._life_id
+        self._think_seq += 1
+        seq = self._think_seq
+        conversation = list(self.conversation)
+
+        def worker() -> None:
+            try:
+                decision = self.llm.decide(self.persona, perception, conversation)
+                outcome = {"decision": decision, "error": None}
+            except BrainError as e:
+                outcome = {"decision": None, "error": str(e)}
+            except Exception as e:  # the mind must never kill the body
+                outcome = {"decision": None, "error": f"unexpected: {e!r}"}
+            outcome.update(perception=perception, heard=heard,
+                           life_id=life_id, seq=seq)
+            self._think_outcome = outcome
+
+        self._think_thread = threading.Thread(target=worker, daemon=True,
+                                              name="humanmade-think")
+        self._think_thread.start()
+
+    def _collect_thought(self) -> None:
+        """Apply a finished worker-thread decision, if one has landed."""
+        outcome = self._think_outcome
+        if outcome is None:
+            return
+        self._think_outcome = None
+        if outcome["seq"] != self._think_seq:
+            return  # a superseded worker finished late — a newer one is in flight
+        self._think_thread = None
+        if outcome["life_id"] != self._life_id or not self.body.alive:
+            return  # thought from a past life or after death — let it go
+
+        if outcome["error"] is not None:
+            self._llm_fail_streak += 1
+            if self._llm_fail_streak == 1:
+                self.on_event(f"(mind fog: {outcome['error']})")
+            if self._llm_fail_streak >= 3 and self.llm_online:
+                self.llm_online = False
+                self.on_event("(the higher mind went dark — survival instinct "
+                              "takes over; will retry the LLM periodically)")
+            decision = self.reflex.decide(self.body, self.world)
+        else:
+            self._llm_fail_streak = 0
+            decision = outcome["decision"]
+        self._apply_decision(decision, outcome["perception"], outcome["heard"])
+
+    def _spawn_reconnect_probe(self) -> None:
+        def probe() -> None:
+            if self.llm.available():
+                with self.lock:
+                    if not self.llm_online:
+                        self.llm_online = True
+                        self._llm_fail_streak = 0
+                        self.on_event("(the higher mind flickers back online)")
+        threading.Thread(target=probe, daemon=True,
+                         name="humanmade-probe").start()
+
+    def _apply_decision(self, decision: dict, perception: str, heard: bool) -> None:
         self.conversation.append({"role": "user", "content": perception})
         self.conversation.append({"role": "assistant", "content": json.dumps(decision)})
         self.conversation = self.conversation[-16:]
@@ -265,19 +352,32 @@ class Human:
 
     # ------------------------------------------------------------- reflection
 
-    def _reflect(self) -> None:
+    def _begin_reflection(self) -> None:
         self.memory.mark_reflected()
         if not self.llm_online:
             return
         recent = self.memory.recent(30)
         text = "\n".join(f"- {m.text}" for m in recent)
-        try:
-            insights = self.llm.reflect(self.persona, text)
-        except BrainError:
-            return
-        for insight in insights:
-            self.memory.add("reflection", insight, self.body.sim_minutes, importance=8)
-            self.on_event(f"({self.persona['name']} realizes: {insight})")
+        life_id = self._life_id
+        self._reflecting = True
+
+        def worker() -> None:
+            insights: list[str] = []
+            try:
+                insights = self.llm.reflect(self.persona, text)
+            except Exception:
+                pass
+            with self.lock:
+                self._reflecting = False
+                if life_id != self._life_id or not self.body.alive:
+                    return
+                for insight in insights:
+                    self.memory.add("reflection", insight, self.body.sim_minutes,
+                                    importance=8)
+                    self.on_event(f"({self.persona['name']} realizes: {insight})")
+
+        threading.Thread(target=worker, daemon=True,
+                         name="humanmade-reflect").start()
 
     # ------------------------------------------------------------------ death
 
@@ -296,19 +396,26 @@ class Human:
 
     def new_life(self) -> None:
         """Archive the old memory DB and start a fresh person."""
-        self.memory.close()
-        old = os.path.join(self.state_dir, "memory.sqlite3")
-        if os.path.exists(old):
-            stamp = time.strftime("%Y%m%d-%H%M%S")
-            os.rename(old, os.path.join(self.state_dir, f"memory-{stamp}.sqlite3"))
-        self.memory = MemoryStream(old)
-        self.body, self.world = Body(), World()
-        self.persona = make_persona()
-        self.conversation.clear()
-        self.inbox.clear()
-        self.current_action = "idle"
-        self.action_minutes_left = 5.0
-        self.memory.set_meta("persona", json.dumps(self.persona))
-        self.memory.add("event", f"{self.persona['name']} came into existence.",
-                        self.body.sim_minutes, importance=10)
-        self.save()
+        with self.lock:
+            self._life_id += 1            # orphan any in-flight thoughts
+            self._think_thread = None
+            self._think_outcome = None
+            self._reflecting = False
+            self.memory.close()
+            old = os.path.join(self.state_dir, "memory.sqlite3")
+            if os.path.exists(old):
+                stamp = time.strftime("%Y%m%d-%H%M%S")
+                os.rename(old, os.path.join(self.state_dir, f"memory-{stamp}.sqlite3"))
+            self.memory = MemoryStream(old)
+            self.body, self.world = Body(), World()
+            self.persona = make_persona()
+            self.conversation.clear()
+            self.inbox.clear()
+            self.current_action = "idle"
+            self.action_minutes_left = 5.0
+            self.minutes_since_decision = 0.0
+            self._llm_fail_streak = 0
+            self.memory.set_meta("persona", json.dumps(self.persona))
+            self.memory.add("event", f"{self.persona['name']} came into existence.",
+                            self.body.sim_minutes, importance=10)
+            self.save()

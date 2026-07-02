@@ -74,8 +74,10 @@ server's `base_url` in `config.json`.
   cycle it receives its persona, vitals, mood, surroundings, retrieved memories, and
   anything you said, and returns `{thought, action, say, importance}`. `say` is how
   it initiates conversation — nothing forces it to speak, and nothing stops it.
-  If the LLM is unreachable, a priority-rule **reflex brain** (a brainstem) takes
-  over survival until the model returns.
+  Thinking runs on its own thread against a snapshot of perception, so the body
+  keeps living (in accurate ≤5-minute physiology steps) while a slow model
+  deliberates. If the LLM is unreachable, a priority-rule **reflex brain** (a
+  brainstem) takes over survival until the model returns.
 - **Memory** (`humanmade/memory.py`) — a persistent memory stream. Retrieval scores
   every memory on **recency + importance + relevance** and feeds the best ones back
   into thought. Periodic **reflection** compresses recent memories into first-person
@@ -129,3 +131,16 @@ llama.cpp, vLLM) at its `base_url`.
 
 Small models (3B–8B) work fine — the JSON decision format is deliberately simple.
 Better models produce a more interesting inner life.
+
+## Development
+
+Tests are stdlib-only (`unittest`) and need no real model — an in-process mock
+Ollama server (`tests/mockllm.py`) stands in for the mind:
+
+```bash
+python -m unittest -v
+```
+
+The suite covers physiology (including death), big-tick integration, memory
+retrieval and persistence, decision parsing, reflex priorities, asynchronous
+thinking, LLM-failure fallback, and reincarnation.

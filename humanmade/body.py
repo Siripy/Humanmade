@@ -78,8 +78,26 @@ class Body:
 
     # ------------------------------------------------------------------ tick
 
+    MAX_STEP_MINUTES = 5.0
+
     def tick(self, minutes: float, activity: str = "idle") -> list[str]:
-        """Advance physiology by `minutes` of sim time. Returns event strings."""
+        """Advance physiology by `minutes` of sim time. Returns event strings.
+
+        Integrates in small sub-steps: a slow LLM call plus a high sim speed can
+        produce one huge time jump, and a single Euler step across hours would
+        skip overflow/death thresholds. Repeated warnings are deduplicated.
+        """
+        events: list[str] = []
+        remaining = minutes
+        while remaining > 1e-9 and self.alive:
+            step = min(self.MAX_STEP_MINUTES, remaining)
+            remaining -= step
+            for e in self._step(step, activity):
+                if e not in events:
+                    events.append(e)
+        return events
+
+    def _step(self, minutes: float, activity: str) -> list[str]:
         if not self.alive:
             return []
         events: list[str] = []

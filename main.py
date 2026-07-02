@@ -17,6 +17,7 @@ import os
 import sys
 import threading
 import time
+import traceback
 
 from humanmade.agent import Human
 
@@ -75,12 +76,18 @@ def main() -> None:
         while not stop.is_set():
             time.sleep(1.0)
             now = time.monotonic()
-            if human.body.alive:
-                human.tick((now - last) * speed)
+            try:
+                if human.body.alive:
+                    human.tick((now - last) * speed)
+                if now - last_save > 60:
+                    human.save()
+                    last_save = now
+            except Exception:
+                with print_lock:
+                    traceback.print_exc()
+                out(f"{C_EVENT}!! simulation hiccup (see traceback above) — "
+                    f"life continues{C_RESET}")
             last = now
-            if now - last_save > 60:
-                human.save()
-                last_save = now
 
     sim = threading.Thread(target=life_loop, daemon=True)
     sim.start()
@@ -98,13 +105,13 @@ def main() -> None:
                 break
             elif line == "/status":
                 with print_lock:
-                    print("\n".join(human.body.status_lines()))
-                    print(f"  fridge: {human.world.food_portions} portions")
+                    print("\n".join(human.status_report()))
             elif line.startswith("/memories"):
                 parts = line.split()
                 n = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 15
+                memories = human.recent_memories(n)
                 with print_lock:
-                    for m in human.memory.recent(n):
+                    for m in memories:
                         d, mm = divmod(int(m.sim_minutes), 1440)
                         print(f"  [d{d} {mm//60:02d}:{mm%60:02d}] "
                               f"({m.kind}, imp {m.importance:.0f}) {m.text}")
@@ -114,9 +121,7 @@ def main() -> None:
                     speed = max(0.1, min(60.0, float(parts[1])))
                 print(f"speed: {speed} sim-min per real second")
             elif line == "/restock":
-                total = human.world.restock()
-                human.memory.add("event", "My companion restocked the fridge.",
-                                 human.body.sim_minutes, importance=6)
+                total = human.restock()
                 out(f"{C_EVENT}· groceries delivered — fridge now holds {total} portions{C_RESET}")
             elif line == "/thoughts":
                 show_thoughts = not show_thoughts
