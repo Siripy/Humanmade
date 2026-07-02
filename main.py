@@ -53,11 +53,19 @@ def main() -> None:
     config = load_config()
     speed = float(config.get("speed", 1.0))  # sim minutes per real second
 
+    # first run: let the user name their human (blank = a random person)
+    chosen_name = None
+    first_run = not os.path.exists(os.path.join(STATE_DIR, "memory.sqlite3"))
+    if first_run and sys.stdin.isatty():
+        chosen_name = input("A new person is about to exist. "
+                            "Name them (or press Enter for a stranger): ").strip() or None
+
     human = Human(
         STATE_DIR, config,
         on_speak=lambda t: out(f"{C_SPEAK}{human.persona['name']}: {t}{C_RESET}"),
         on_event=lambda t: out(f"{C_EVENT}· {t}{C_RESET}"),
         on_thought=lambda t: show_thoughts and out(f"{C_THOUGHT}({t}){C_RESET}"),
+        name=chosen_name,
     )
 
     name = human.persona["name"]
@@ -124,8 +132,14 @@ def main() -> None:
                     speed = max(0.1, min(60.0, float(parts[1])))
                 print(f"speed: {speed} sim-min per real second")
             elif line == "/restock":
-                total = human.restock()
-                out(f"{C_EVENT}· groceries delivered — fridge now holds {total} portions{C_RESET}")
+                r = human.restock()
+                if r["bought"] > 0:
+                    out(f"{C_EVENT}· groceries delivered — {r['bought']} portions "
+                        f"bought, fridge holds {r['total']}, {name} has "
+                        f"{r['money']:.0f} credits left{C_RESET}")
+                else:
+                    out(f"{C_EVENT}· the order was declined — {name} can't afford "
+                        f"any food ({r['money']:.0f} credits). They need to work.{C_RESET}")
             elif line == "/thoughts":
                 show_thoughts = not show_thoughts
                 print(f"inner monologue: {'on' if show_thoughts else 'off'}")

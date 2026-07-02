@@ -65,7 +65,7 @@ def make_persona(name: str | None = None) -> dict:
 
 class Human:
     def __init__(self, state_dir: str, config: dict,
-                 on_speak, on_event, on_thought=None):
+                 on_speak, on_event, on_thought=None, name: str | None = None):
         os.makedirs(state_dir, exist_ok=True)
         self.state_dir = state_dir
         self.config = config
@@ -75,7 +75,7 @@ class Human:
 
         self.lock = threading.RLock()
         self.memory = MemoryStream(os.path.join(state_dir, "memory.sqlite3"))
-        self.body, self.world, self.persona = self._load_state()
+        self.body, self.world, self.persona = self._load_state(name)
 
         self.llm = LLMBrain(config.get("llm", {}))
         self.reflex = ReflexBrain()
@@ -115,9 +115,19 @@ class Human:
         self._think_outcome: dict | None = None
         self._reflecting = False
 
+        # semantic memory ("hippocampus"): a background thread embeds new
+        # memories; retrieval then works by meaning instead of word overlap.
+        # Needs an embedding model on the server; degrades silently without one.
+        self._embed_ok = False        # at least one batch succeeded
+        self._embed_disabled = False  # gave up (no embed model available)
+        self._embed_fails = 0
+        self._embed_interval = float(config.get("embed_interval_seconds", 5.0))
+        threading.Thread(target=self._embed_loop, daemon=True,
+                         name="humanmade-hippocampus").start()
+
     # ------------------------------------------------------------ persistence
 
-    def _load_state(self) -> tuple[Body, World, dict]:
+    def _load_state(self, name: str | None = None) -> tuple[Body, World, dict]:
         body_json = self.memory.get_meta("body")
         world_json = self.memory.get_meta("world")
         persona_json = self.memory.get_meta("persona")
@@ -126,7 +136,7 @@ class Human:
             body = Body.from_dict(json.loads(body_json)) if body_json else Body()
             world = World.from_dict(json.loads(world_json)) if world_json else World()
             return body, world, persona
-        persona = make_persona()
+        persona = make_persona(name)
         body, world = Body(), World()
         self.memory.set_meta("persona", json.dumps(persona))
         self.memory.add("event", f"{persona['name']} came into existence.",
@@ -179,17 +189,28 @@ class Human:
                                 importance=6)
                 self.minutes_since_decision = 10 ** 6  # let it say goodbye
 
-    def restock(self, portions: int = 8) -> int:
+    def restock(self, portions: int = 8) -> dict:
+        """Place a grocery order with the human's own credits. Returns what
+        happened so the CLI can report it honestly."""
         with self.lock:
-            total = self.world.restock(portions)
-            self.memory.add("event", "My companion restocked the fridge.",
-                            self.body.sim_minutes, importance=6)
-            return total
+            bought = self.world.restock(portions)
+            if bought > 0:
+                self.memory.add("event",
+                                f"My companion ordered groceries — {bought} portions, "
+                                f"paid from my credits ({self.world.money:.0f} left).",
+                                self.body.sim_minutes, importance=6)
+            else:
+                self.memory.add("event", "My companion tried to order groceries but "
+                                "I couldn't afford any. I need to work.",
+                                self.body.sim_minutes, importance=7)
+            return {"bought": bought, "total": self.world.food_portions,
+                    "money": self.world.money}
 
     def status_report(self) -> list[str]:
         with self.lock:
             return self.body.status_lines() + [
-                f"  fridge: {self.world.food_portions} portions"]
+                f"  fridge: {self.world.food_portions} portions · "
+                f"credits: {self.world.money:.0f}"]
 
     def recent_memories(self, n: int = 15):
         with self.lock:
@@ -236,6 +257,39 @@ class Human:
             if (self.memory.reflection_due() and not self.body.asleep
                     and not self._reflecting):
                 self._begin_reflection()
+
+    # -------------------------------------------------------- semantic memory
+
+    def _embed_loop(self) -> None:
+        while True:
+            time.sleep(self._embed_interval)
+            if not self.llm_online or self._embed_disabled:
+                continue
+            try:
+                with self.lock:
+                    batch = self.memory.unembedded(16)
+                if not batch:
+                    continue
+                vectors = self.llm.embed([text for _, text in batch])
+                with self.lock:
+                    for (mem_id, _), vec in zip(batch, vectors):
+                        self.memory.set_embedding(mem_id, vec)
+                self._embed_ok = True
+                self._embed_fails = 0
+            except BrainError:
+                self._embed_fails += 1
+                if self._embed_fails >= 3:
+                    self._embed_disabled = True  # no embed model — stop asking
+            except Exception:
+                return  # DB closed mid-shutdown or similar — stand down
+
+    def _query_embedding(self, query: str) -> list[float] | None:
+        if not (self._embed_ok and self.llm_online and not self._embed_disabled):
+            return None
+        try:
+            return self.llm.embed([query])[0]
+        except BrainError:
+            return None
 
     # --------------------------------------------------------- sleep & dreams
 
@@ -352,9 +406,10 @@ class Human:
             lines.append(f"You just woke; last night you dreamt: {self.last_dream} "
                          "You might mention it if it feels worth sharing.")
 
-        query = " ".join(urgent) + " " + " ".join(self.inbox[-2:])
-        retrieved = self.memory.retrieve(query or "daily life companion",
-                                         b.sim_minutes, k=6)
+        query = (" ".join(urgent) + " " + " ".join(self.inbox[-2:])).strip()
+        query = query or "daily life companion"
+        retrieved = self.memory.retrieve(query, b.sim_minutes, k=6,
+                                         query_embedding=self._query_embedding(query))
         if retrieved:
             lines.append("Relevant memories:")
             lines += [f"  - ({m.kind}) {m.text}" for m in retrieved]
@@ -462,12 +517,25 @@ class Human:
                     if not self.llm_online:
                         self.llm_online = True
                         self._llm_fail_streak = 0
+                        self._embed_disabled = False  # maybe embeddings too
+                        self._embed_fails = 0
                         self.on_event("(the higher mind flickers back online)")
         threading.Thread(target=probe, daemon=True,
                          name="humanmade-probe").start()
 
+    @staticmethod
+    def _compact_perception(perception: str) -> str:
+        """History entry for a past thought cycle: keep the moment (time, mood)
+        and what the companion said; drop stale vitals, memories, and world
+        text. Small local models drown in repeated full-perception dumps."""
+        keep = [line for line in perception.splitlines()
+                if line.startswith(("[", "Your companion", "YOUR COMPANION",
+                                    "URGENT:"))]
+        return "\n".join(keep) or perception.split("\n", 1)[0]
+
     def _apply_decision(self, decision: dict, perception: str, heard: bool) -> None:
-        self.conversation.append({"role": "user", "content": perception})
+        self.conversation.append({"role": "user",
+                                  "content": self._compact_perception(perception)})
         self.conversation.append({"role": "assistant", "content": json.dumps(decision)})
         self.conversation = self.conversation[-16:]
 
@@ -534,7 +602,9 @@ class Human:
             b.fun = min(100.0, b.fun + 25); narration = "curls up with a book"
         elif action == "work":
             b.fun = min(100.0, b.fun + 10)
-            narration = f"works on {self.persona['backstory'].split('spends time ')[-1].split('.')[0]}"
+            wage = self.world.earn(1.0)
+            narration = (f"works on {self.persona['backstory'].split('spends time ')[-1].split('.')[0]}"
+                         f" and earns {wage:.0f} credits ({self.world.money:.0f} saved)")
 
         self.current_action = action
         self.action_minutes_left = ACTION_DURATION.get(action, 20)

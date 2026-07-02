@@ -12,6 +12,7 @@ the simulation degrades gracefully instead of dying with the model offline.
 from __future__ import annotations
 
 import json
+import os
 import re
 import urllib.error
 import urllib.request
@@ -59,13 +60,19 @@ class LLMBrain:
     def __init__(self, config: dict):
         self.provider = config.get("provider", "ollama")
         self.model = config.get("model", "llama3.2")
-        self.base_url = config.get("base_url", "http://localhost:11434").rstrip("/")
+        default_base = "http://localhost:11434"
+        env_host = os.environ.get("OLLAMA_HOST")
+        if env_host and "base_url" not in config:
+            default_base = env_host if "://" in env_host else f"http://{env_host}"
+        self.base_url = config.get("base_url", default_base).rstrip("/")
         self.temperature = float(config.get("temperature", 0.9))
         self.timeout = float(config.get("timeout_seconds", 120))
+        self.embed_model = config.get("embed_model", "nomic-embed-text")
+        self.embed_timeout = float(config.get("embed_timeout_seconds", 5))
 
     # -- transport
 
-    def _post(self, path: str, payload: dict) -> dict:
+    def _post(self, path: str, payload: dict, timeout: float | None = None) -> dict:
         req = urllib.request.Request(
             self.base_url + path,
             data=json.dumps(payload).encode(),
@@ -73,7 +80,7 @@ class LLMBrain:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with urllib.request.urlopen(req, timeout=timeout or self.timeout) as resp:
                 return json.loads(resp.read().decode())
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
             raise BrainError(f"LLM unreachable at {self.base_url}: {e}") from e
@@ -99,6 +106,27 @@ class LLMBrain:
             payload["response_format"] = {"type": "json_object"}
         data = self._post("/v1/chat/completions", payload)
         return data["choices"][0]["message"]["content"]
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        """Embed texts for semantic memory retrieval. Requires an embedding
+        model on the server (e.g. `ollama pull nomic-embed-text`); callers
+        treat failure as 'no semantic memory today', not an error."""
+        if not texts:
+            return []
+        if self.provider == "ollama":
+            data = self._post("/api/embed", {"model": self.embed_model,
+                                             "input": texts},
+                              timeout=self.embed_timeout)
+            vectors = data.get("embeddings")
+        else:
+            data = self._post("/v1/embeddings", {"model": self.embed_model,
+                                                 "input": texts},
+                              timeout=self.embed_timeout)
+            vectors = [d.get("embedding") for d in data.get("data", [])]
+        if (not isinstance(vectors, list) or len(vectors) != len(texts)
+                or not all(isinstance(v, list) and v for v in vectors)):
+            raise BrainError(f"no embeddings from {self.embed_model}")
+        return vectors
 
     def available(self) -> bool:
         try:
@@ -221,6 +249,9 @@ class ReflexBrain:
             (body.satiety < 30, "drink", "starving, but the fridge is empty — "
                                          "water will have to do"),
             (body.energy < 20, "sleep", "I can't keep my eyes open"),
+            (world.food_portions <= 1 and not world.can_afford(4)
+             and body.energy > 30,
+             "work", "fridge is nearly empty and I'm broke — better earn"),
             (body.hygiene < 30, "shower", "I need a shower"),
             (body.fun < 25, "relax", "I need a break"),
         ]

@@ -7,7 +7,8 @@ Retrieval scores each memory on three axes and returns the top-K:
     score = w_r * recency  +  w_i * importance  +  w_v * relevance
   - recency:    exponential decay over sim-hours since last access
   - importance: 1-10, heuristic (or LLM-rated when a brain is available)
-  - relevance:  token overlap with the query (no embedding model required)
+  - relevance:  cosine similarity of embeddings when a local embedding model
+                is available (semantic recall), token overlap otherwise
 
 Reflection periodically compresses recent memories into higher-level insights
 that are themselves stored with high importance — this is what lets the
@@ -16,6 +17,7 @@ simulated human form beliefs about its life instead of only recalling events.
 
 from __future__ import annotations
 
+import json
 import math
 import re
 import sqlite3
@@ -35,6 +37,15 @@ def _tokens(text: str) -> set[str]:
     return {w for w in re.findall(r"[a-z']+", text.lower()) if w not in _STOPWORDS}
 
 
+def _cosine(a: list[float], b: list[float]) -> float:
+    if len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(x * x for x in b))
+    return dot / (na * nb) if na and nb else 0.0
+
+
 @dataclass
 class Memory:
     id: int
@@ -49,6 +60,7 @@ class Memory:
 class MemoryStream:
     def __init__(self, db_path: str):
         self.db = sqlite3.connect(db_path, check_same_thread=False)
+        self.db.execute("PRAGMA journal_mode=WAL")  # crash-safe, better concurrency
         self.db.execute(
             """CREATE TABLE IF NOT EXISTS memories (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,9 +69,14 @@ class MemoryStream:
                 importance REAL NOT NULL,
                 sim_minutes REAL NOT NULL,
                 created_at REAL NOT NULL,
-                last_access REAL NOT NULL
+                last_access REAL NOT NULL,
+                embedding TEXT
             )"""
         )
+        try:  # migrate pre-embedding databases
+            self.db.execute("ALTER TABLE memories ADD COLUMN embedding TEXT")
+        except sqlite3.OperationalError:
+            pass
         self.db.execute(
             """CREATE TABLE IF NOT EXISTS meta (
                 key TEXT PRIMARY KEY, value TEXT NOT NULL
@@ -114,20 +131,27 @@ class MemoryStream:
 
     # -------------------------------------------------------------- retrieve
 
-    def retrieve(self, query: str, now_sim_minutes: float, k: int = 8) -> list[Memory]:
+    def retrieve(self, query: str, now_sim_minutes: float, k: int = 8,
+                 query_embedding: list[float] | None = None) -> list[Memory]:
         rows = self.db.execute(
-            "SELECT id,kind,text,importance,sim_minutes,created_at,last_access "
-            "FROM memories ORDER BY id DESC LIMIT 600"
+            "SELECT id,kind,text,importance,sim_minutes,created_at,last_access,"
+            "embedding FROM memories ORDER BY id DESC LIMIT 600"
         ).fetchall()
         if not rows:
             return []
         qtok = _tokens(query)
         scored: list[tuple[float, Memory]] = []
         for row in rows:
-            m = Memory(*row)
+            m = Memory(*row[:7])
             recency = RECENCY_DECAY ** max(0.0, now_sim_minutes - m.last_access)
-            mtok = _tokens(m.text)
-            relevance = len(qtok & mtok) / math.sqrt(len(qtok) + 1) if qtok else 0.0
+            emb_json = row[7]
+            if query_embedding is not None and emb_json:
+                # semantic recall: meaning, not word overlap
+                relevance = max(0.0, _cosine(query_embedding, json.loads(emb_json)))
+            else:
+                mtok = _tokens(m.text)
+                relevance = (len(qtok & mtok) / math.sqrt(len(qtok) + 1)
+                             if qtok else 0.0)
             score = (W_RECENCY * recency
                      + W_IMPORTANCE * m.importance / 10.0
                      + W_RELEVANCE * min(1.0, relevance))
@@ -156,6 +180,19 @@ class MemoryStream:
 
     def count(self) -> int:
         return self.db.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+
+    # ------------------------------------------------------------- embeddings
+
+    def unembedded(self, limit: int = 16) -> list[tuple[int, str]]:
+        """Most recent memories that still lack an embedding vector."""
+        return self.db.execute(
+            "SELECT id,text FROM memories WHERE embedding IS NULL "
+            "ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+
+    def set_embedding(self, memory_id: int, vector: list[float]) -> None:
+        self.db.execute("UPDATE memories SET embedding=? WHERE id=?",
+                        (json.dumps(vector), memory_id))
+        self.db.commit()
 
     # ------------------------------------------------------------ reflection
 

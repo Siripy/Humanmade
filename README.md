@@ -27,19 +27,23 @@ model comes online.
 # 1. (recommended) start a local model
 ollama pull llama3.2 && ollama serve
 
-# 2. run the simulator
+# 2. (optional, for semantic memory) an embedding model
+ollama pull nomic-embed-text
+
+# 3. run the simulator — on first run you get to name your human
 python main.py
 ```
 
 LM Studio / llama.cpp / vLLM work too — set `"provider": "openai"` and the
-server's `base_url` in `config.json`.
+server's `base_url` in `config.json`. `OLLAMA_HOST` is honored when
+`base_url` isn't set.
 
 | Command | Effect |
 |---|---|
 | *(any text)* | talk to the human |
 | `/status` | vitals: health, hydration, bladder, heart rate, breathing… |
 | `/memories [n]` | browse its memory stream |
-| `/restock` | buy groceries (it depends on you for food!) |
+| `/restock` | place a grocery order — paid from the *human's* credits |
 | `/away` | tell it you're leaving — it says goodbye, then waits |
 | `/plan` | see the plan it sketched for today |
 | `/dream` | recall what it dreamt last night |
@@ -95,13 +99,18 @@ a low `/speed` and it'll have a day's worth of life — and a dream — to recou
   **reflex brain** (a brainstem) takes over survival until the model returns.
 - **Memory** (`humanmade/memory.py`) — a persistent memory stream. Retrieval scores
   every memory on **recency + importance + relevance** and feeds the best ones back
-  into thought. Periodic **reflection** compresses recent memories into first-person
-  insights ("my companion always comes back"). After a real night's sleep, **overnight
-  consolidation** softens the emotional charge of the previous day's painful memories
-  while keeping their content. Tell it your name today; it can bring it up next week.
-- **World** (`humanmade/world.py`) — water is on tap, but food is finite and only
-  *you* can restock it, so the human has real, need-driven reasons to start
-  conversations.
+  into thought. Relevance is **semantic** when a local embedding model is available
+  (`ollama pull nomic-embed-text` — a background "hippocampus" thread embeds new
+  memories, and recall then works by meaning, not word overlap), falling back to
+  token overlap otherwise. Periodic **reflection** compresses recent memories into
+  first-person insights ("my companion always comes back"). After a real night's
+  sleep, **overnight consolidation** softens the emotional charge of the previous
+  day's painful memories while keeping their content. Tell it your name today; it
+  can bring it up next week.
+- **World** (`humanmade/world.py`) — water is on tap, but food is finite and costs
+  money. The human earns credits with its `work` action; only *you* can place the
+  grocery order, and it spends *the human's* credits — so "I'm broke", "the fridge
+  is empty", and "could you order food?" are all real conversations it has to start.
 - **Attachment** (`humanmade/agent.py`) — the human tracks whether you're present.
   When you leave it registers the separation, feels your absence, and queues up news;
   when you return it greets you first, its warmth scaled by how long you were gone.
@@ -159,12 +168,15 @@ archived as `memory-<timestamp>.sqlite3` after death.
 ```json
 {
   "speed": 1.0,
+  "embed_interval_seconds": 5.0,
   "llm": {
     "provider": "ollama",
     "base_url": "http://localhost:11434",
     "model": "llama3.2",
+    "embed_model": "nomic-embed-text",
     "temperature": 0.9,
-    "timeout_seconds": 120
+    "timeout_seconds": 120,
+    "embed_timeout_seconds": 5
   }
 }
 ```
@@ -186,6 +198,7 @@ python -m unittest -v
 
 The suite covers physiology (including death), big-tick integration, memory
 retrieval and persistence, decision parsing, reflex priorities, asynchronous
-thinking, LLM-failure fallback, reincarnation, and the behavior layer:
-chronotype, emotional inertia, dreams, overnight consolidation, daily planning,
-and the away/return reunion flow.
+thinking, LLM-failure fallback, reincarnation, the behavior layer (chronotype,
+emotional inertia, dreams, overnight consolidation, daily planning, the
+away/return reunion flow), the credit economy, semantic memory embeddings,
+conversation compression, and first-run naming.

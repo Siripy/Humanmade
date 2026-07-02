@@ -14,6 +14,18 @@ DEFAULT_DECISION = {
     "importance": 7,
 }
 
+EMBED_DIM = 32
+
+
+def fake_embedding(text: str) -> list[float]:
+    """Deterministic bag-of-words hash vector: shared words -> similar vectors,
+    a cheap stand-in for a real embedding model."""
+    vec = [0.0] * EMBED_DIM
+    for word in text.lower().split():
+        vec[hash(word) % EMBED_DIM] += 1.0
+    norm = sum(v * v for v in vec) ** 0.5 or 1.0
+    return [v / norm for v in vec]
+
 
 def start_mock_ollama(decision: dict | None = None,
                       insights: list[str] | None = None,
@@ -48,6 +60,13 @@ def start_mock_ollama(decision: dict | None = None,
                 time.sleep(delay)
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length))
+            if self.path == "/api/embed":
+                texts = body.get("input", [])
+                if isinstance(texts, str):
+                    texts = [texts]
+                self._respond(json.dumps(
+                    {"embeddings": [fake_embedding(t) for t in texts]}))
+                return
             system = body["messages"][0]["content"]
             if "reflective mind" in system:
                 content = json.dumps({"insights": insights})
@@ -57,11 +76,14 @@ def start_mock_ollama(decision: dict | None = None,
                 content = json.dumps({"plan": plan})
             else:
                 content = json.dumps(decision)
-            resp = json.dumps({"message": {"role": "assistant", "content": content}})
+            self._respond(json.dumps(
+                {"message": {"role": "assistant", "content": content}}))
+
+        def _respond(self, payload: str):
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(resp.encode())
+            self.wfile.write(payload.encode())
 
     srv = HTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
