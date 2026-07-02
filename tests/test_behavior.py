@@ -142,6 +142,72 @@ class TestDreamAndPlan(unittest.TestCase):
             human.memory.close()
 
 
+class TestSurvivalOverride(unittest.TestCase):
+    """A negligent LLM must not be able to relax the body to death."""
+
+    def _human_with_negligent_brain(self, tmp):
+        srv, base_url = start_mock_ollama(
+            decision={"thought": "everything is fine", "action": "relax",
+                      "say": None, "importance": 2})
+        self.addCleanup(srv.stop)
+        cfg = {"llm": {"provider": "ollama", "base_url": base_url,
+                       "model": "test", "timeout_seconds": 5}}
+        return make_human(tmp, cfg)
+
+    def test_instinct_forces_drinking_when_dying_of_thirst(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            human, _, events = self._human_with_negligent_brain(tmp)
+            human.body.hydration = 10.0
+            drive_one_thought(human)
+            self.assertEqual(human.current_action, "drink")
+            self.assertTrue(any("instinct overrides" in e for e in events))
+            human.memory.close()
+
+    def test_mind_is_left_alone_when_it_behaves(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            human, _, events = self._human_with_negligent_brain(tmp)
+            drive_one_thought(human)  # no critical needs -> relax stands
+            self.assertEqual(human.current_action, "relax")
+            self.assertFalse(any("instinct overrides" in e for e in events))
+            human.memory.close()
+
+    def test_sleep_inertia_ignores_casual_actions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            human, _, _ = self._human_with_negligent_brain(tmp)
+            human.body.fall_asleep()
+            human.tick(1.0)                    # register the transition
+            drive_one_thought(human)           # mind says "relax" while asleep
+            self.assertTrue(human.body.asleep, "a murmured 'relax' must not "
+                                               "wake the body")
+            human.memory.close()
+
+    def test_forced_survival_action_does_wake_the_body(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            human, _, _ = self._human_with_negligent_brain(tmp)
+            human.body.fall_asleep()
+            human.tick(1.0)
+            human.body.hydration = 10.0        # dying of thirst mid-sleep
+            drive_one_thought(human)
+            self.assertFalse(human.body.asleep, "thirst should drag it out of bed")
+            self.assertEqual(human.current_action, "drink")
+            human.memory.close()
+
+    def test_negligent_brain_survives_five_days(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            human, _, _ = self._human_with_negligent_brain(tmp)
+            human.world.money = 100.0
+            deadline = time.time() + 60
+            for _ in range(5 * 288):          # 5 days in 5-min ticks
+                human.tick(5.0)
+                time.sleep(0.001)             # let think workers land
+                if not human.body.alive or time.time() > deadline:
+                    break
+            self.assertTrue(human.body.alive,
+                            f"died of {human.body.cause_of_death} on day "
+                            f"{human.body.day} despite the survival override")
+            human.memory.close()
+
+
 class TestReunion(unittest.TestCase):
     def test_away_then_return_triggers_reunion_greeting(self):
         srv, base_url = start_mock_ollama(

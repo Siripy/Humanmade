@@ -126,6 +126,9 @@ class Body:
             self.satiety = clamp(self.satiety - 0.035 * minutes)  # slower BMR asleep
             self.hydration = clamp(self.hydration - 0.012 * minutes)
             self.fun = clamp(self.fun + 0.01 * minutes)  # dreams count a little
+            if self.energy >= 99.5 and self.circadian_sleep_drive() < 0.45:
+                self.asleep = False       # fully rested + daylight = natural waking
+                events.append("woke up naturally, fully rested")
         else:
             self.awake_minutes += minutes
             # Sleep pressure: ~16h awake drains a full charge

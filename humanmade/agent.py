@@ -533,7 +533,30 @@ class Human:
                                     "URGENT:"))]
         return "\n".join(keep) or perception.split("\n", 1)[0]
 
+    def _survival_override(self, decision: dict) -> dict:
+        """The brainstem vetoes a negligent cortex. If a need has reached a
+        dying/bursting threshold and the mind chose something else, instinct
+        forces the survival action — the mind's words and thoughts still
+        stand, but the body acts. Without this, a dumb or distracted LLM can
+        relax its way to death while URGENT flags scroll past it."""
+        b = self.body
+        needed: list[str] = []
+        if b.hydration < 15:
+            needed.append("drink")
+        if b.bladder > 90 or b.bowel > 90:
+            needed.append("toilet")
+        if b.satiety < 12 and self.world.food_portions > 0:
+            needed.append("eat")
+        if b.energy < 8 and not b.asleep:
+            needed.append("sleep")
+        if not needed or decision["action"] in needed:
+            return decision
+        forced = needed[0]
+        self.on_event(f"(instinct overrides the mind — the body demands: {forced})")
+        return {**decision, "action": forced, "_forced": True}
+
     def _apply_decision(self, decision: dict, perception: str, heard: bool) -> None:
+        decision = self._survival_override(decision)
         self.conversation.append({"role": "user",
                                   "content": self._compact_perception(perception)})
         self.conversation.append({"role": "assistant", "content": json.dumps(decision)})
@@ -561,16 +584,20 @@ class Human:
             self.memory.add("thought", "I heard them but didn't feel like answering.",
                             self.body.sim_minutes, importance=2)
 
-        self._perform(decision["action"])
+        self._perform(decision["action"], forced=decision.get("_forced", False))
 
     # ----------------------------------------------------------------- action
 
-    def _perform(self, action: str) -> None:
+    def _perform(self, action: str, forced: bool = False) -> None:
         b = self.body
-        if b.asleep and action not in ("wake", "idle"):
-            # body wakes itself if the mind decided to do something
-            b.wake_up()
-            self.on_event(f"{self.persona['name']} wakes up.")
+        if b.asleep and action not in ("wake", "idle", "sleep"):
+            if forced:
+                # a survival need drags the body out of bed (thirst wakes you)
+                b.wake_up()
+                self.on_event(f"{self.persona['name']} wakes up.")
+            else:
+                # sleep inertia: the dreaming mind murmurs, the body sleeps on
+                action = "idle"
 
         narration = None
         if action == "eat":

@@ -15,8 +15,17 @@ class TestPhysiology(unittest.TestCase):
     def test_sleep_restores_energy(self):
         b = Body(energy=10.0)
         b.fall_asleep()
-        b.tick(480)  # a full night
+        events = b.tick(480)  # a full night (08:00 -> 16:00, circadian low)
         self.assertGreater(b.energy, 90)
+        # fully rested in daylight -> wakes naturally, no mind required
+        self.assertFalse(b.asleep)
+        self.assertTrue(any("woke up naturally" in e for e in events))
+
+    def test_stays_asleep_at_night_until_rested(self):
+        b = Body(energy=10.0)
+        b.sim_minutes = 23 * 60  # falls asleep at 23:00
+        b.fall_asleep()
+        b.tick(120)              # 01:00, energy ~35, circadian high
         self.assertTrue(b.asleep)
 
     def test_actions_change_state(self):

@@ -69,17 +69,18 @@ class ReflexLifeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             human, _, events = make_human(tmp)
             human.llm_online = False
-            # a brain lesion: the reflexes no longer act on anything
-            human.reflex.decide = lambda body, world: {
-                "thought": "", "action": "idle", "say": None, "importance": 1}
-            human.body.hydration = 0.5
-            human.body.health = 1.0
+            # instinct force-drinks from the tap, so neglect alone can't kill;
+            # death comes when the world truly runs out: no food, no money
+            human.world.food_portions = 0
+            human.world.money = 0.0
+            human.body.satiety = 0.5
+            human.body.health = 1.5
             for _ in range(600):
                 human.tick(5.0)
                 if not human.body.alive:
                     break
             self.assertFalse(human.body.alive)
-            self.assertEqual(human.body.cause_of_death, "dehydration")
+            self.assertEqual(human.body.cause_of_death, "starvation")
             self.assertTrue(any("has died" in e for e in events))
 
             old_name = human.persona["name"]
