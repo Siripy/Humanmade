@@ -100,7 +100,7 @@ class TestDreamAndPlan(unittest.TestCase):
                        "model": "test", "timeout_seconds": 5}}
         return make_human(tmp, cfg)
 
-    def _wait(self, pred, timeout=8.0):
+    def _wait(self, pred, timeout=20.0):
         end = time.time() + timeout
         while not pred() and time.time() < end:
             time.sleep(0.01)

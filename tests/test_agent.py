@@ -6,7 +6,8 @@ import unittest
 from humanmade.agent import Human
 from tests.mockllm import start_mock_ollama
 
-THINK_TIMEOUT = 8.0  # wall-clock seconds to wait for a worker-thread thought
+THINK_TIMEOUT = 20.0  # wall-clock seconds to wait for a worker-thread thought
+                      # (generous: shared CI machines stall unpredictably)
 
 
 def make_human(state_dir, config=None):

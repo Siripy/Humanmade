@@ -109,7 +109,7 @@ class TestSemanticMemory(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             human, _, _ = make_human(tmp, cfg)
             self.assertTrue(human.llm_online)
-            deadline = time.time() + 8
+            deadline = time.time() + 20
             while time.time() < deadline:
                 with human.lock:
                     if not human.memory.unembedded(5):

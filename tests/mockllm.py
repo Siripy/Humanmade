@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import time
@@ -19,10 +20,12 @@ EMBED_DIM = 32
 
 def fake_embedding(text: str) -> list[float]:
     """Deterministic bag-of-words hash vector: shared words -> similar vectors,
-    a cheap stand-in for a real embedding model."""
+    a cheap stand-in for a real embedding model. Uses md5, NOT builtin hash(),
+    because hash() is salted per process and would make tests flaky."""
     vec = [0.0] * EMBED_DIM
     for word in text.lower().split():
-        vec[hash(word) % EMBED_DIM] += 1.0
+        bucket = int(hashlib.md5(word.encode()).hexdigest(), 16) % EMBED_DIM
+        vec[bucket] += 1.0
     norm = sum(v * v for v in vec) ** 0.5 or 1.0
     return [v / norm for v in vec]
 
