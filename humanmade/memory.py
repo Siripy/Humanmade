@@ -1,0 +1,163 @@
+"""Persistent memory stream, modeled on Park et al. 2023 ("Generative Agents").
+
+Every experience — observations, thoughts, conversations, reflections — is a
+timestamped record in SQLite, so memory genuinely survives across runs.
+
+Retrieval scores each memory on three axes and returns the top-K:
+    score = w_r * recency  +  w_i * importance  +  w_v * relevance
+  - recency:    exponential decay over sim-hours since last access
+  - importance: 1-10, heuristic (or LLM-rated when a brain is available)
+  - relevance:  token overlap with the query (no embedding model required)
+
+Reflection periodically compresses recent memories into higher-level insights
+that are themselves stored with high importance — this is what lets the
+simulated human form beliefs about its life instead of only recalling events.
+"""
+
+from __future__ import annotations
+
+import math
+import re
+import sqlite3
+import time
+from dataclasses import dataclass
+
+RECENCY_DECAY = 0.995          # per sim-minute of unuse
+W_RECENCY, W_IMPORTANCE, W_RELEVANCE = 1.0, 1.0, 1.4
+
+_STOPWORDS = frozenset(
+    "a an the i you it is are was were be been to of and or in on at for with "
+    "my your me that this its as so but if then had has have do did not".split()
+)
+
+
+def _tokens(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z']+", text.lower()) if w not in _STOPWORDS}
+
+
+@dataclass
+class Memory:
+    id: int
+    kind: str          # observation | thought | conversation | reflection | event
+    text: str
+    importance: float  # 1..10
+    sim_minutes: float # sim time when formed
+    created_at: float  # wall-clock, for the archaeology of past runs
+    last_access: float # sim time when last retrieved
+
+
+class MemoryStream:
+    def __init__(self, db_path: str):
+        self.db = sqlite3.connect(db_path, check_same_thread=False)
+        self.db.execute(
+            """CREATE TABLE IF NOT EXISTS memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL,
+                text TEXT NOT NULL,
+                importance REAL NOT NULL,
+                sim_minutes REAL NOT NULL,
+                created_at REAL NOT NULL,
+                last_access REAL NOT NULL
+            )"""
+        )
+        self.db.execute(
+            """CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY, value TEXT NOT NULL
+            )"""
+        )
+        self.db.commit()
+        self._importance_since_reflection = 0.0
+
+    # ------------------------------------------------------------------ meta
+
+    def get_meta(self, key: str, default: str | None = None) -> str | None:
+        row = self.db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return row[0] if row else default
+
+    def set_meta(self, key: str, value: str) -> None:
+        self.db.execute(
+            "INSERT INTO meta(key,value) VALUES(?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+        self.db.commit()
+
+    # ----------------------------------------------------------------- write
+
+    def add(self, kind: str, text: str, sim_minutes: float,
+            importance: float | None = None) -> None:
+        if importance is None:
+            importance = self._heuristic_importance(kind, text)
+        self.db.execute(
+            "INSERT INTO memories(kind,text,importance,sim_minutes,created_at,last_access)"
+            " VALUES(?,?,?,?,?,?)",
+            (kind, text.strip(), importance, sim_minutes, time.time(), sim_minutes),
+        )
+        self.db.commit()
+        self._importance_since_reflection += importance
+
+    @staticmethod
+    def _heuristic_importance(kind: str, text: str) -> float:
+        base = {"reflection": 8.0, "conversation": 5.0, "event": 5.0,
+                "thought": 3.0, "observation": 2.0}.get(kind, 3.0)
+        loaded = ("died", "death", "accident", "starving", "dehydrated", "lonely",
+                  "afraid", "love", "first", "never", "promise", "name")
+        if any(w in text.lower() for w in loaded):
+            base = min(10.0, base + 3.0)
+        return base
+
+    # -------------------------------------------------------------- retrieve
+
+    def retrieve(self, query: str, now_sim_minutes: float, k: int = 8) -> list[Memory]:
+        rows = self.db.execute(
+            "SELECT id,kind,text,importance,sim_minutes,created_at,last_access "
+            "FROM memories ORDER BY id DESC LIMIT 600"
+        ).fetchall()
+        if not rows:
+            return []
+        qtok = _tokens(query)
+        scored: list[tuple[float, Memory]] = []
+        for row in rows:
+            m = Memory(*row)
+            recency = RECENCY_DECAY ** max(0.0, now_sim_minutes - m.last_access)
+            mtok = _tokens(m.text)
+            relevance = len(qtok & mtok) / math.sqrt(len(qtok) + 1) if qtok else 0.0
+            score = (W_RECENCY * recency
+                     + W_IMPORTANCE * m.importance / 10.0
+                     + W_RELEVANCE * min(1.0, relevance))
+            scored.append((score, m))
+        scored.sort(key=lambda s: s[0], reverse=True)
+        top = [m for _, m in scored[:k]]
+        ids = [m.id for m in top]
+        self.db.execute(
+            f"UPDATE memories SET last_access=? WHERE id IN ({','.join('?' * len(ids))})",
+            [now_sim_minutes, *ids],
+        )
+        self.db.commit()
+        return top
+
+    def recent(self, n: int = 20, kinds: tuple[str, ...] | None = None) -> list[Memory]:
+        q = ("SELECT id,kind,text,importance,sim_minutes,created_at,last_access "
+             "FROM memories ")
+        args: list = []
+        if kinds:
+            q += f"WHERE kind IN ({','.join('?' * len(kinds))}) "
+            args += list(kinds)
+        q += "ORDER BY id DESC LIMIT ?"
+        args.append(n)
+        rows = self.db.execute(q, args).fetchall()
+        return [Memory(*r) for r in reversed(rows)]
+
+    def count(self) -> int:
+        return self.db.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+
+    # ------------------------------------------------------------ reflection
+
+    def reflection_due(self, threshold: float = 60.0) -> bool:
+        return self._importance_since_reflection >= threshold
+
+    def mark_reflected(self) -> None:
+        self._importance_since_reflection = 0.0
+
+    def close(self) -> None:
+        self.db.close()

@@ -1,0 +1,10 @@
+{
+  "speed": 1.0,
+  "llm": {
+    "provider": "ollama",
+    "base_url": "http://localhost:11434",
+    "model": "llama3.2",
+    "temperature": 0.9,
+    "timeout_seconds": 120
+  }
+}
