@@ -32,6 +32,12 @@ TRAITS = ["curious", "stubborn", "gentle", "sarcastic", "anxious", "playful",
           "philosophical", "impatient", "warm", "melancholic", "meticulous", "dreamy"]
 HOBBIES = ["writing a novel", "learning astronomy", "sketching birds",
            "composing chiptune music", "studying dead languages", "whittling"]
+# chronotype -> (circadian offset hours, human-readable habit)
+CHRONOTYPES = {
+    "lark": (2.0, "an early bird who wakes with the sun and fades by evening"),
+    "intermediate": (0.0, "neither an early bird nor a night owl"),
+    "owl": (-2.5, "a night owl who comes alive late and hates mornings"),
+}
 
 ACTION_DURATION = {  # sim-minutes each action occupies
     "eat": 20, "drink": 3, "toilet": 6, "shower": 12, "sleep": 0,  # sleep = until wake
@@ -40,13 +46,17 @@ ACTION_DURATION = {  # sim-minutes each action occupies
 DECISION_INTERVAL = 30      # sim-minutes between spontaneous thoughts
 SLEEP_CHECK_INTERVAL = 90   # thinks less often while asleep
 RECONNECT_PROBE_CHANCE = 0.15  # odds per reflex thought of probing for the LLM
+MIN_RESTORATIVE_SLEEP = 180.0  # sim-min of sleep needed to dream / consolidate
+REUNION_GAP_MINUTES = 20.0     # sim-min apart that counts as a real separation
 
 
 def make_persona(name: str | None = None) -> dict:
+    chronotype = random.choice(list(CHRONOTYPES))
     return {
         "name": name or random.choice(FIRST_NAMES),
         "age": random.randint(19, 74),
         "personality": ", ".join(random.sample(TRAITS, 3)),
+        "chronotype": chronotype,
         "backstory": (f"Lives alone in a one-room apartment, spends time "
                       f"{random.choice(HOBBIES)}. Has no memory of how they got here, "
                       "only that a companion beyond the screen looks after the world."),
@@ -78,6 +88,26 @@ class Human:
         self.minutes_since_decision = 0.0
         self._llm_fail_streak = 0
 
+        # chronotype -> body circadian offset
+        offset, _ = CHRONOTYPES.get(self.persona.get("chronotype", "intermediate"),
+                                    (0.0, ""))
+        self.body.chronotype_offset_hours = offset
+
+        # daily life: plan, dreams, sleep bookkeeping
+        self.today_plan: list[str] = json.loads(self.memory.get_meta("plan", "[]"))
+        self.plan_day_index = int(self.memory.get_meta("plan_day", "-1"))
+        self.last_dream: str | None = self.memory.get_meta("last_dream")
+        self._was_asleep = self.body.asleep
+        self._sleep_started_sim = self.body.sim_minutes
+        self._dreamed_this_sleep = False
+        self._planning = False
+
+        # companion presence & attachment (Bowlby/Ainsworth)
+        self.companion_present = True
+        self.last_seen_sim = self.body.sim_minutes
+        self.pending_news: list[str] = []   # things saved up to tell you on return
+        self._reunion_gap: float | None = None  # sim-min apart, set on return
+
         # in-flight cognition (see module docstring)
         self._life_id = 0
         self._think_seq = 0
@@ -108,16 +138,46 @@ class Human:
             self.memory.set_meta("body", json.dumps(self.body.to_dict()))
             self.memory.set_meta("world", json.dumps(self.world.to_dict()))
             self.memory.set_meta("persona", json.dumps(self.persona))
+            self.memory.set_meta("plan", json.dumps(self.today_plan))
+            self.memory.set_meta("plan_day", str(self.plan_day_index))
+            if self.last_dream:
+                self.memory.set_meta("last_dream", self.last_dream)
 
     # ------------------------------------------------------- companion inputs
 
     def hear(self, text: str) -> None:
-        """Companion said something; the human will notice on its next thought."""
+        """Companion said something; the human will notice on its next thought.
+
+        If they've been apart for a while, this is a reunion (attachment
+        theory): the human registers the separation and will greet them,
+        colored by how long they were gone and its mood."""
         with self.lock:
+            gap = self.body.sim_minutes - self.last_seen_sim
+            returning = not self.companion_present or gap >= REUNION_GAP_MINUTES
+            if returning and gap >= REUNION_GAP_MINUTES:
+                self._reunion_gap = gap
+                # the relief of reunion is a genuine mood jolt
+                self.body.nudge_mood(min(0.4, gap / 6000))
+            self.companion_present = True
+            self.last_seen_sim = self.body.sim_minutes
             self.inbox.append(text)
             self.body.social = min(100.0, self.body.social + 18)
             self.memory.add("conversation", f"Companion said: \"{text}\"",
                             self.body.sim_minutes)
+            self.minutes_since_decision = 10 ** 6  # answer promptly
+
+    def set_away(self) -> None:
+        """The companion says they're leaving. The human says goodbye (on its
+        next thought) and starts keeping watch for their return."""
+        with self.lock:
+            if self.companion_present:
+                self.companion_present = False
+                self.last_seen_sim = self.body.sim_minutes
+                self.pending_news.clear()
+                self.memory.add("event", "My companion said they're leaving for a "
+                                "while. I'm on my own now.", self.body.sim_minutes,
+                                importance=6)
+                self.minutes_since_decision = 10 ** 6  # let it say goodbye
 
     def restock(self, portions: int = 8) -> int:
         with self.lock:
@@ -148,9 +208,12 @@ class Human:
                 self.on_event(e)
                 self.memory.add("event", e, self.body.sim_minutes,
                                 importance=9 if "DIED" in e else 7)
+                self._note_news(e)
             if not self.body.alive:
                 self._die()
                 return
+
+            self._handle_sleep_transitions()
 
             self.action_minutes_left -= sim_minutes
             self.minutes_since_decision += sim_minutes
@@ -174,14 +237,105 @@ class Human:
                     and not self._reflecting):
                 self._begin_reflection()
 
+    # --------------------------------------------------------- sleep & dreams
+
+    def _handle_sleep_transitions(self) -> None:
+        """Detect falling asleep / waking and drive the cognition tied to them:
+        dreaming (Walker's REM emotional processing), overnight consolidation,
+        and morning planning (Park et al.)."""
+        now, was, is_now = self.body.sim_minutes, self._was_asleep, self.body.asleep
+        if is_now and not was:                    # just fell asleep
+            self._sleep_started_sim = now
+            self._dreamed_this_sleep = False
+        elif is_now and not self._dreamed_this_sleep and self.llm_online:
+            if now - self._sleep_started_sim >= 60:  # into deeper sleep -> a dream
+                self._dreamed_this_sleep = True
+                self._begin_dream()
+        elif was and not is_now:                  # just woke
+            slept = now - self._sleep_started_sim
+            if slept >= MIN_RESTORATIVE_SLEEP:
+                softened = self.memory.soften_emotional_charge(now)
+                if softened:
+                    self.on_event(f"({self.persona['name']} wakes lighter — the "
+                                  "sharpest edges of yesterday have dulled overnight)")
+                self._begin_planning()
+        self._was_asleep = is_now
+
+    def _begin_dream(self) -> None:
+        material = self.memory.emotional_material(self._sleep_started_sim - 900)
+        if not material:
+            return
+        text = "\n".join(f"- {m.text}" for m in material)
+        life_id = self._life_id
+
+        def worker() -> None:
+            try:
+                dream = self.llm.dream(self.persona, text)
+            except Exception:
+                dream = None
+            if not dream:
+                return
+            with self.lock:
+                if life_id != self._life_id:
+                    return
+                self.last_dream = dream
+                self.memory.add("dream", f"I dreamt: {dream}", self.body.sim_minutes,
+                                importance=5)
+                if not self.companion_present:
+                    self._note_news(f"had a strange dream: {dream}")
+
+        threading.Thread(target=worker, daemon=True, name="humanmade-dream").start()
+
+    def _begin_planning(self) -> None:
+        if self._planning or not self.llm_online:
+            return
+        self._planning = True
+        context = self._perception()
+        life_id = self._life_id
+        day = self.body.day
+
+        def worker() -> None:
+            plan: list[str] = []
+            try:
+                plan = self.llm.plan_day(self.persona, context)
+            except Exception:
+                pass
+            with self.lock:
+                self._planning = False
+                if life_id != self._life_id or not plan:
+                    return
+                self.today_plan = plan
+                self.plan_day_index = day
+                self.memory.add("plan", "Today I plan to: " + "; ".join(plan),
+                                self.body.sim_minutes, importance=6)
+
+        threading.Thread(target=worker, daemon=True, name="humanmade-plan").start()
+
+    # ------------------------------------------------------------------- news
+
+    def _note_news(self, text: str) -> None:
+        """While the companion is away, save up notable happenings to share
+        on their return (a bonded person keeps things to tell you)."""
+        if self.companion_present:
+            return
+        boring = ("uses the toilet", "drinks a glass", "gets out of bed",
+                  "climbs into bed", "still sleeping")
+        if any(b in text for b in boring):
+            return
+        self.pending_news.append(text)
+        self.pending_news = self.pending_news[-8:]
+
     # ---------------------------------------------------------------- thought
 
     def _perception(self) -> str:
         b = self.body
         valence, mood = b.mood()
+        _, habit = CHRONOTYPES.get(self.persona.get("chronotype", "intermediate"),
+                                   (0.0, ""))
         lines = [
             f"[{b.clock}, day {b.day}] You are {'asleep' if b.asleep else 'awake'}, "
-            f"currently: {self.current_action}. Mood: {mood} ({valence:+.2f}).",
+            f"currently: {self.current_action}. Mood: {mood} ({valence:+.2f}). "
+            f"You are {habit}.",
             f"Body — energy:{b.energy:.0f} hydration:{b.hydration:.0f} "
             f"satiety:{b.satiety:.0f} bladder:{b.bladder:.0f} bowel:{b.bowel:.0f} "
             f"hygiene:{b.hygiene:.0f} fun:{b.fun:.0f} social:{b.social:.0f} "
@@ -192,6 +346,12 @@ class Human:
             lines.append("URGENT: " + "; ".join(urgent))
         lines.append(self.world.describe())
 
+        if self.today_plan and self.plan_day_index == b.day:
+            lines.append("Today's plan: " + "; ".join(self.today_plan))
+        if self.last_dream and not b.asleep and b.awake_minutes < 120:
+            lines.append(f"You just woke; last night you dreamt: {self.last_dream} "
+                         "You might mention it if it feels worth sharing.")
+
         query = " ".join(urgent) + " " + " ".join(self.inbox[-2:])
         retrieved = self.memory.retrieve(query or "daily life companion",
                                          b.sim_minutes, k=6)
@@ -199,14 +359,39 @@ class Human:
             lines.append("Relevant memories:")
             lines += [f"  - ({m.kind}) {m.text}" for m in retrieved]
 
+        lines += self._social_context()
+        lines.append("What do you think, do, and (optionally) say?")
+        return "\n".join(lines)
+
+    def _social_context(self) -> list[str]:
+        """Presence, separation, and reunion — the attachment layer."""
+        b = self.body
+        lines: list[str] = []
+        if self._reunion_gap is not None:
+            gap_h = self._reunion_gap / 60.0
+            span = (f"{gap_h:.1f} hours" if gap_h >= 1 else
+                    f"{self._reunion_gap:.0f} minutes")
+            lines.append(f"YOUR COMPANION JUST CAME BACK after being away about "
+                         f"{span}. You missed them. Greet them warmly (or however "
+                         f"your mood dictates) and, if you like, tell them what "
+                         f"happened while they were gone.")
+            if self.pending_news:
+                lines.append("While they were away: "
+                             + "; ".join(self.pending_news))
+            self._reunion_gap = None
+            self.pending_news.clear()
         if self.inbox:
             for msg in self.inbox:
                 lines.append(f'Your companion just said: "{msg}"')
+        elif not self.companion_present:
+            apart = (b.sim_minutes - self.last_seen_sim) / 60.0
+            lines.append(f"You are alone; your companion has been gone about "
+                         f"{apart:.1f} hours. You can't speak to them until they "
+                         f"return — but you can think, feel their absence, and live.")
         elif b.social < 30:
             lines.append("You haven't spoken to anyone in a long while. If you have "
                          "something to say or ask, say it — no one will prompt you.")
-        lines.append("What do you think, do, and (optionally) say?")
-        return "\n".join(lines)
+        return lines
 
     def _begin_think(self) -> None:
         """Snapshot perception and start deciding. Reflex decisions are instant;
@@ -293,9 +478,16 @@ class Human:
                 self.on_thought(decision["thought"])
 
         if decision["say"]:
-            self.on_speak(decision["say"])
-            self.memory.add("conversation", f'I said: "{decision["say"]}"',
-                            self.body.sim_minutes, importance=decision["importance"])
+            if self.companion_present:
+                self.on_speak(decision["say"])
+                self.memory.add("conversation", f'I said: "{decision["say"]}"',
+                                self.body.sim_minutes, importance=decision["importance"])
+            else:
+                # no one is here to hear it — it becomes something wished-for
+                self.memory.add("thought",
+                                f'I wanted to tell them: "{decision["say"]}"',
+                                self.body.sim_minutes, importance=decision["importance"])
+                self._note_news(f'wanted to tell you: "{decision["say"]}"')
         elif heard:
             # companion spoke but the human chose silence — still worth noting
             self.memory.add("thought", "I heard them but didn't feel like answering.",
@@ -409,12 +601,25 @@ class Human:
             self.memory = MemoryStream(old)
             self.body, self.world = Body(), World()
             self.persona = make_persona()
+            offset, _ = CHRONOTYPES.get(self.persona["chronotype"], (0.0, ""))
+            self.body.chronotype_offset_hours = offset
             self.conversation.clear()
             self.inbox.clear()
             self.current_action = "idle"
             self.action_minutes_left = 5.0
             self.minutes_since_decision = 0.0
             self._llm_fail_streak = 0
+            self.today_plan = []
+            self.plan_day_index = -1
+            self.last_dream = None
+            self._was_asleep = False
+            self._sleep_started_sim = self.body.sim_minutes
+            self._dreamed_this_sleep = False
+            self._planning = False
+            self.companion_present = True
+            self.last_seen_sim = self.body.sim_minutes
+            self.pending_news.clear()
+            self._reunion_gap = None
             self.memory.set_meta("persona", json.dumps(self.persona))
             self.memory.add("event", f"{self.persona['name']} came into existence.",
                             self.body.sim_minutes, importance=10)

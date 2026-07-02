@@ -82,6 +82,13 @@ class MemoryStream:
         )
         self.db.commit()
 
+    # words that mark a memory as emotionally charged (importance + dreams +
+    # overnight softening) or as a life milestone (importance only)
+    _EMOTIONAL = ("lonely", "alone", "afraid", "scared", "fear", "love", "happy",
+                  "hurt", "cried", "mortified", "miss", "hope", "empty",
+                  "starving", "dehydrated", "died", "death", "accident")
+    _MILESTONE = ("first", "never", "promise", "name", "born", "came into existence")
+
     # ----------------------------------------------------------------- write
 
     def add(self, kind: str, text: str, sim_minutes: float,
@@ -96,13 +103,12 @@ class MemoryStream:
         self.db.commit()
         self._importance_since_reflection += importance
 
-    @staticmethod
-    def _heuristic_importance(kind: str, text: str) -> float:
+    @classmethod
+    def _heuristic_importance(cls, kind: str, text: str) -> float:
         base = {"reflection": 8.0, "conversation": 5.0, "event": 5.0,
-                "thought": 3.0, "observation": 2.0}.get(kind, 3.0)
-        loaded = ("died", "death", "accident", "starving", "dehydrated", "lonely",
-                  "afraid", "love", "first", "never", "promise", "name")
-        if any(w in text.lower() for w in loaded):
+                "thought": 3.0, "dream": 5.0, "plan": 6.0,
+                "observation": 2.0}.get(kind, 3.0)
+        if any(w in text.lower() for w in cls._EMOTIONAL + cls._MILESTONE):
             base = min(10.0, base + 3.0)
         return base
 
@@ -158,6 +164,35 @@ class MemoryStream:
 
     def mark_reflected(self) -> None:
         self._importance_since_reflection = 0.0
+
+    # -------------------------------------------------------- sleep & dreaming
+
+    def emotional_material(self, since_sim_minutes: float,
+                           limit: int = 12) -> list[Memory]:
+        """The day's most charged memories — raw material for a dream."""
+        rows = self.db.execute(
+            "SELECT id,kind,text,importance,sim_minutes,created_at,last_access "
+            "FROM memories WHERE sim_minutes>=? ORDER BY importance DESC, id DESC "
+            "LIMIT ?", (since_sim_minutes, limit)).fetchall()
+        return [Memory(*r) for r in rows]
+
+    def soften_emotional_charge(self, before_sim_minutes: float,
+                                factor: float = 0.7) -> int:
+        """REM 'overnight therapy' (Walker): after real sleep, dampen the
+        importance of charged memories formed before waking, so their sting
+        fades while the content is kept. Returns how many were softened."""
+        rows = self.db.execute(
+            "SELECT id,text,importance FROM memories WHERE sim_minutes<? "
+            "AND importance>5", (before_sim_minutes,)).fetchall()
+        softened = 0
+        for mid, text, importance in rows:
+            if any(w in text.lower() for w in self._EMOTIONAL):
+                self.db.execute("UPDATE memories SET importance=? WHERE id=?",
+                                (max(1.0, importance * factor), mid))
+                softened += 1
+        if softened:
+            self.db.commit()
+        return softened
 
     def close(self) -> None:
         self.db.close()

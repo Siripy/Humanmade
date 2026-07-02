@@ -134,6 +134,38 @@ class LLMBrain:
         except (json.JSONDecodeError, AttributeError):
             return []
 
+    def plan_day(self, persona: dict, context: str) -> list[str]:
+        """Sketch the day into a handful of intentions (Park et al. planning)."""
+        system = (f"You are {persona['name']}, a simulated human waking up to a new day. "
+                  f"You are {persona['personality']}. Given your situation, sketch a loose "
+                  "plan for today as 4-6 short first-person intentions tied to rough times "
+                  "or needs (meals, hygiene, your hobby, rest, reaching out to your "
+                  'companion). Respond ONLY with JSON: {"plan": ["...", "..."]}')
+        raw = self.chat(system, [{"role": "user", "content": context}])
+        try:
+            data = json.loads(_extract_json(raw))
+            return [str(p) for p in data.get("plan", [])][:6]
+        except (json.JSONDecodeError, AttributeError):
+            return []
+
+    def dream(self, persona: dict, memories_text: str) -> str | None:
+        """Weave the day's charged memories into a short surreal dream.
+
+        Grounded in REM's role in emotional processing (Walker): the dream
+        recombines real fragments, often loosening their literal meaning.
+        """
+        system = (f"You are the dreaming mind of {persona['name']}, asleep. Weave the "
+                  "given memory fragments into a short, surreal first-person dream (2-3 "
+                  "sentences). It need not be logical. Respond ONLY with JSON: "
+                  '{"dream": "..."}')
+        raw = self.chat(system, [{"role": "user", "content": memories_text}])
+        try:
+            data = json.loads(_extract_json(raw))
+            dream = str(data.get("dream", "")).strip()
+            return dream or None
+        except (json.JSONDecodeError, AttributeError):
+            return None
+
 
 def _extract_json(raw: str) -> str:
     match = re.search(r"\{.*\}", raw, re.DOTALL)

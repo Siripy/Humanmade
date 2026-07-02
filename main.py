@@ -9,6 +9,8 @@ Commands:
   /status        show vitals            /memories [n]  show recent memories
   /speed <n>     sim minutes per real second (default 1, max 60)
   /restock       buy groceries          /thoughts      toggle inner monologue
+  /away          tell it you're leaving (it waits; type anything to return)
+  /plan          see today's plan        /dream        recall last night's dream
   /newlife       start a new person     /quit          save and exit
 """
 
@@ -65,7 +67,8 @@ def main() -> None:
              else f"OFFLINE — reflex survival mode. Start your local model "
                   f"(e.g. `ollama run {human.llm.model}`) and it will reconnect.")
           + C_RESET)
-    print(f"{C_EVENT}{name}, {human.persona['age']} — {human.persona['personality']}. "
+    print(f"{C_EVENT}{name}, {human.persona['age']} — {human.persona['personality']} "
+          f"({human.persona.get('chronotype', 'intermediate')}). "
           f"{human.memory.count()} memories on record.{C_RESET}\n")
 
     stop = threading.Event()
@@ -126,6 +129,25 @@ def main() -> None:
             elif line == "/thoughts":
                 show_thoughts = not show_thoughts
                 print(f"inner monologue: {'on' if show_thoughts else 'off'}")
+            elif line == "/away":
+                human.set_away()
+                print(f"{C_EVENT}You step out. {name} is now on their own — "
+                      f"type anything when you're back.{C_RESET}")
+            elif line == "/plan":
+                with print_lock:
+                    if human.today_plan:
+                        print(f"{name}'s plan for today:")
+                        for item in human.today_plan:
+                            print(f"  • {item}")
+                    else:
+                        print(f"{name} hasn't made a plan yet "
+                              "(plans form on waking, with the LLM brain online).")
+            elif line == "/dream":
+                with print_lock:
+                    if human.last_dream:
+                        print(f"{name}'s last dream: {human.last_dream}")
+                    else:
+                        print(f"{name} doesn't remember dreaming yet.")
             elif line == "/newlife":
                 if human.body.alive:
                     print(f"{name} is still alive. This only works after death.")

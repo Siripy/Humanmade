@@ -52,6 +52,20 @@ class Body:
     spo2: float = 98.0
     body_temp_c: float = 36.7
 
+    # Chronotype: shifts the circadian curve. +hours = lark (early), -hours = owl.
+    chronotype_offset_hours: float = 0.0
+
+    # Emotional inertia (Koval & Kuppens): mood is autocorrelated, so it lags
+    # need-satisfaction rather than snapping to it. Smoothed over ~90 sim-min.
+    valence_smoothed: float = 0.0
+    _valence_ready: bool = False
+    VALENCE_TAU_MIN: float = 90.0
+
+    def __post_init__(self) -> None:
+        if not self._valence_ready:
+            self.valence_smoothed = self._instant_valence()
+            self._valence_ready = True
+
     # ------------------------------------------------------------------ time
 
     @property
@@ -72,7 +86,8 @@ class Body:
 
         Peaks around 03:00, trough around 15:00 (post-lunch dip added).
         """
-        phase = math.cos((self.hour - 3.0) / 24.0 * 2 * math.pi)  # 1 at 03:00
+        h = self.hour + self.chronotype_offset_hours   # lark peaks earlier
+        phase = math.cos((h - 3.0) / 24.0 * 2 * math.pi)  # 1 at 03:00 (adjusted)
         dip = 0.15 * math.exp(-((self.hour - 14.5) ** 2) / 2.0)   # afternoon dip
         return clamp((phase + 1) / 2 + dip, 0.0, 1.0)
 
@@ -130,7 +145,19 @@ class Body:
         events += self._overflow_check()
         events += self._health_update(minutes)
         self._update_vitals(exertion)
+        self._update_mood(minutes)
         return events
+
+    def _update_mood(self, minutes: float) -> None:
+        # Exponential smoothing toward instant valence (emotional inertia).
+        alpha = 1.0 - math.exp(-minutes / self.VALENCE_TAU_MIN)
+        target = self._instant_valence()
+        self.valence_smoothed += alpha * (target - self.valence_smoothed)
+
+    def nudge_mood(self, delta: float) -> None:
+        """Apply an immediate emotional jolt (a reunion, a fright) on top of
+        the slow-moving smoothed mood."""
+        self.valence_smoothed = max(-1.0, min(1.0, self.valence_smoothed + delta))
 
     # ---------------------------------------------------------------- damage
 
@@ -193,13 +220,17 @@ class Body:
 
     # ---------------------------------------------------------------- affect
 
-    def mood(self) -> tuple[float, str]:
-        """Valence -1..1 plus a label, derived from need satisfaction (PAD-lite)."""
+    def _instant_valence(self) -> float:
+        """Momentary valence -1..1 from need satisfaction (PAD-lite)."""
         needs = [self.energy, self.hydration, self.satiety, self.hygiene,
                  self.fun, self.social, 100 - self.bladder, 100 - self.bowel]
         valence = (sum(needs) / len(needs) - 50) / 50
         valence -= (100 - self.health) / 150
-        valence = max(-1.0, min(1.0, valence))
+        return max(-1.0, min(1.0, valence))
+
+    def mood(self) -> tuple[float, str]:
+        """Slow-moving felt mood (emotional inertia) plus a label."""
+        valence = self.valence_smoothed
         for threshold, label in [(0.45, "content"), (0.2, "okay"), (-0.1, "restless"),
                                  (-0.35, "miserable")]:
             if valence >= threshold:
