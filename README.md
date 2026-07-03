@@ -54,7 +54,7 @@ server's `base_url` in `config.json`. `OLLAMA_HOST` is honored when
 | `/read` | the piece it's currently working on, and how far along it is |
 | `/works` | the library of everything it's ever finished and sold |
 | `/biography` | its whole life story so far, in its own words |
-| `/speed <n>` | sim-minutes per real second (default 1) |
+| `/speed <n>` | sim-minutes per real second (default 1; disabled in [time-true mode](#living-in-real-time-optional-off-by-default)) |
 | `/thoughts` | toggle the inner monologue |
 | `/newlife` | after a death, a new person is born (old memories archived) |
 | `/quit` | save and exit — it keeps existing between runs |
@@ -91,6 +91,34 @@ configured allowlist (Wikipedia by default) never loads — the human can look, 
 there is no "type" or "submit" anywhere in its vocabulary. See `humanmade/internet.py`
 for the whole thing; `tests/test_internet.py` and `tests/test_browsing.py` exercise
 it end to end against a local mock website, no real network required.
+
+### Living in real time (optional, off by default)
+
+By default the human lives on an artificial `/speed` (1 sim-minute per real
+second, adjustable). Set `"time": {"mode": "real"}` in `config.json` and its
+clock is anchored to *yours* instead — its day is your day, `/speed` no longer
+applies, and time doesn't stop just because you closed the terminal. The
+anchor is a single `(real time, sim time)` pair persisted to disk; on every
+relaunch, however long the app was closed, the human has been "living" the
+whole while. Rather than run thousands of individual ticks for a multi-day
+gap, it **catches up all at once** on startup — reflex-only, no LLM calls, so
+a week apart costs a few seconds of real time, not a slow replay. It reuses
+the *existing* away/reunion machinery to do this (it's already what happens
+whenever you leave): it's marked away, needs drain and get tended to by its
+own reflexes, anything noteworthy queues up, and the moment you say something
+after relaunch it greets you and tells you how it went — exactly like any
+other homecoming, just a longer one. A very long gap (7+ real days) is capped;
+the excess just passes as "a long, quiet stretch" rather than simulating a
+month tick by tick. It's possible to come back and find it didn't make it —
+neglect is neglect, whether you were watching or not.
+
+Optionally, `"time": {"weather": {"real": true, "latitude": ..., "longitude":
+...}}` mirrors the *actual* weather at a real place (via
+[Open-Meteo](https://open-meteo.com/), no API key needed) onto the sim's sky
+every 30 minutes, instead of the random weather cycle — so a storm outside
+your own window can be a storm outside its window too. It fails silently back
+to the simulated cycle if the request doesn't succeed (offline, timeout,
+unreachable) — never blocks, never crashes the sim.
 
 ## How it works
 
@@ -209,6 +237,13 @@ it end to end against a local mock website, no real network required.
   LLM to stitch the highest-importance memories of its whole life (plus how its
   own temperament has genuinely shifted since day one) into an honest first-person
   life story.
+- **Time-true mode** (`humanmade/timeflow.py`, optional) — the human's clock
+  anchored to your real clock rather than an artificial multiplier. The same
+  `anchor -> target sim-time` formula handles ordinary live pacing and offline
+  catch-up after the app was closed — a big gap is just a bigger input to the
+  same function, run reflex-only (no LLM calls) and capped at 7 days so a
+  months-long gap can't turn into a marathon replay. See "Living in real time"
+  above.
 
 ## Research notes
 
@@ -304,6 +339,14 @@ archived as `memory-<timestamp>.sqlite3` after death.
 {
   "speed": 1.0,
   "embed_interval_seconds": 5.0,
+  "time": {
+    "mode": "sim",
+    "weather": {
+      "real": false,
+      "latitude": null,
+      "longitude": null
+    }
+  },
   "llm": {
     "provider": "ollama",
     "base_url": "http://localhost:11434",
@@ -339,6 +382,11 @@ Better models produce a more interesting inner life.
 anything in particular (otherwise a query becomes a Wikipedia search), and
 `chromium_path` only needs setting if Playwright can't find its browser on its own.
 
+`time.mode` is `"sim"` by default; set it to `"real"` for time-true mode — see
+"Living in real time" above. `time.weather.real` mirrors actual weather at
+`latitude`/`longitude` (via Open-Meteo, no API key) instead of the random cycle;
+it's ignored unless both coordinates are set.
+
 ## Development
 
 Tests are stdlib-only (`unittest`) and need no real model or real internet — an
@@ -357,7 +405,9 @@ away/return reunion flow), the credit economy, semantic memory embeddings,
 conversation compression, first-run naming, real creative-work sessions
 (fragment writing, titling, completion and sale, cross-life archiving), identity
 drift (bounded/rate-limited/origin-capped trait change, self-esteem, self-view,
-biography synthesis), and — when [Playwright](https://playwright.dev/) is
+biography synthesis), time-true mode (anchor math, offline catch-up reusing the
+away/reunion flow, the 7-day cap, and real-weather mirroring with a mocked
+Open-Meteo response), and — when [Playwright](https://playwright.dev/) is
 installed — real browsing (viewport-only sight, link-following, scrolling, the
 read-only safety layer, and the full browse-action lifecycle) against the local
 mock website, with zero real network access.

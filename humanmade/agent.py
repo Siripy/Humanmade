@@ -416,6 +416,18 @@ class Human:
 
     # ------------------------------------------------------------------- tick
 
+    def set_real_weather(self, code: str) -> None:
+        """Override the simulated weather with a real reading (time-true
+        mode's optional weather mirroring). Locks out the random cycle."""
+        with self.lock:
+            if not self.body.alive:
+                return
+            self.world.weather_locked = True
+            for e in self.world.set_weather(code):
+                self.on_event(e)
+                self.memory.add("observation", e, self.body.sim_minutes,
+                                importance=3)
+
     def tick(self, sim_minutes: float) -> None:
         """Advance the person's life by `sim_minutes` of simulated time."""
         with self.lock:
@@ -1490,6 +1502,50 @@ class Human:
         self.on_event(f"{name} has died of {self.body.cause_of_death}. "
                       f"They lived {days} days. Their memories remain in "
                       f"{self.state_dir}. Use /newlife to begin again.")
+
+    # --------------------------------------------------------- time-true mode
+
+    CATCH_UP_STEP_MINUTES = 10.0        # granularity of the catch-up loop
+    CATCH_UP_CAP_MINUTES = 7 * 1440.0   # beyond this, time just passes unlived
+
+    def catch_up(self, gap_minutes: float) -> None:
+        """Live through a real gap all at once (the app was closed) —
+        reusing the away/reunion machinery exactly, since that's precisely
+        what this is: the companion was gone the whole time. Reflex brain
+        only, so catching up on hours of gap never blocks startup on a real
+        LLM call; narration is silenced (nobody was watching); the ordinary
+        reunion flow tells the story once the companion actually says
+        something. Capped at a week of real simulation — beyond that, time
+        just passes; a life doesn't need a played-out month of silence.
+        """
+        if gap_minutes <= 0:
+            return
+        with self.lock:
+            if not self.body.alive:
+                return
+            real_on_event, real_on_speak, real_on_thought = (
+                self.on_event, self.on_speak, self.on_thought)
+            self.on_event = lambda text: None
+            self.on_speak = lambda text: None
+            self.on_thought = None
+            self.llm_online = False   # never block startup on a real call
+            try:
+                self.set_away()
+                capped = min(gap_minutes, self.CATCH_UP_CAP_MINUTES)
+                remaining = capped
+                while remaining > 1e-6 and self.body.alive:
+                    step = min(self.CATCH_UP_STEP_MINUTES, remaining)
+                    remaining -= step
+                    self.tick(step)
+                overflow = gap_minutes - capped
+                if overflow > 0 and self.body.alive:
+                    self.body.sim_minutes += overflow
+                    self._note_news("a long, quiet stretch passed with "
+                                    "nothing much to remark on")
+            finally:
+                self.on_event, self.on_speak = real_on_event, real_on_speak
+                self.on_thought = real_on_thought
+                self.llm_online = self.llm.available()
 
     def new_life(self) -> None:
         """Archive the old memory DB and start a fresh person."""

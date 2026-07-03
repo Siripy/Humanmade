@@ -24,8 +24,13 @@ import sys
 import threading
 import time
 import traceback
+import urllib.parse
+import urllib.request
 
+from humanmade import timeflow
 from humanmade.agent import Human
+
+WEATHER_POLL_SECONDS = 1800.0   # 30 real minutes
 
 STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state")
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
@@ -53,9 +58,47 @@ def out(text: str) -> None:
         sys.stdout.flush()
 
 
+def fetch_real_weather(latitude: float, longitude: float,
+                       timeout: float = 5.0) -> str | None:
+    """One reading from Open-Meteo (no API key needed), mapped onto this
+    sim's weathers. Any failure — offline, timeout, bad response — falls
+    back silently to None so the simulated weather just keeps cycling."""
+    try:
+        url = ("https://api.open-meteo.com/v1/forecast?" +
+               urllib.parse.urlencode({"latitude": latitude,
+                                       "longitude": longitude,
+                                       "current_weather": "true"}))
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            data = json.load(resp)
+        code = int(data["current_weather"]["weathercode"])
+        return timeflow.wmo_to_weather(code)
+    except Exception:
+        return None
+
+
+def _format_span(sim_minutes: float) -> str:
+    hours = sim_minutes / 60.0
+    if hours < 1:
+        return f"{sim_minutes:.0f} minutes"
+    if hours < 48:
+        return f"{hours:.1f} hours"
+    return f"{hours / 24:.1f} days"
+
+
 def main() -> None:
     config = load_config()
     speed = float(config.get("speed", 1.0))  # sim minutes per real second
+    time_config = config.get("time", {})
+    real_time_mode = str(time_config.get("mode", "sim")).lower() == "real"
+    weather_config = time_config.get("weather", {})
+    real_weather_enabled = bool(weather_config.get("real", False))
+    weather_lat = weather_config.get("latitude")
+    weather_lon = weather_config.get("longitude")
+    if real_weather_enabled and (weather_lat is None or weather_lon is None):
+        print(f"{C_EVENT}Real weather is enabled but latitude/longitude "
+              f'are missing from config.json ("time"."weather") — '
+              f"falling back to simulated weather.{C_RESET}")
+        real_weather_enabled = False
 
     # first run: let the user name their human (blank = a random person)
     chosen_name = None
@@ -71,6 +114,7 @@ def main() -> None:
         on_thought=lambda t: show_thoughts and out(f"{C_THOUGHT}({t}){C_RESET}"),
         name=chosen_name,
     )
+    human.world.weather_locked = real_weather_enabled  # config is the source of truth each run
 
     name = human.persona["name"]
     print(__doc__)
@@ -82,13 +126,47 @@ def main() -> None:
     if human.internet_enabled:
         print(f"{C_EVENT}Internet: on — {human.persona['name']} can browse "
               f"(allowlist: {', '.join(human._internet_config.get('allowlist') or ['en.wikipedia.org', '*.wikipedia.org'])}){C_RESET}")
+    if real_weather_enabled:
+        print(f"{C_EVENT}Real weather: on — {name}'s sky mirrors "
+              f"{weather_lat},{weather_lon}, checked every 30 minutes.{C_RESET}")
     print(f"{C_EVENT}{name}, {human.persona['age']} — {human.persona['personality']} "
           f"({human.persona.get('chronotype', 'intermediate')}). "
           f"{human.memory.count()} memories on record.{C_RESET}\n")
 
+    anchor = None
+    if real_time_mode:
+        anchor_json = human.memory.get_meta("time_anchor")
+        if anchor_json:
+            anchor = timeflow.Anchor.from_dict(json.loads(anchor_json))
+            gap = timeflow.target_sim_minutes(anchor) - human.body.sim_minutes
+            if gap > 1.0 and human.body.alive:
+                print(f"{C_EVENT}Catching up on {_format_span(gap)} that passed "
+                      f"while this was closed...{C_RESET}")
+                human.catch_up(gap)
+                if not human.body.alive:
+                    print(f"{C_EVENT}{name} did not make it — died of "
+                          f"{human.body.cause_of_death} while you were away. "
+                          f"Use /newlife to begin again.{C_RESET}")
+                else:
+                    print(f"{C_EVENT}{name} lived through it. Say something to "
+                          f"hear how it went.{C_RESET}")
+        else:
+            # first time real mode is on: align to the real hour-of-day once,
+            # so the human isn't stuck at a jarring hour relative to your clock
+            aligned = timeflow.align_hour_of_day(human.body.sim_minutes,
+                                                 timeflow.real_hour_of_day())
+            if abs(aligned - human.body.sim_minutes) > 1.0:
+                human.body.sim_minutes = aligned
+            print(f"{C_EVENT}Time-true mode: {name}'s clock is now anchored to "
+                  f"yours — /speed doesn't apply.{C_RESET}")
+        anchor = timeflow.rebase(human.body.sim_minutes)
+        human.memory.set_meta("time_anchor", json.dumps(anchor.to_dict()))
+        human.save()
+
     stop = threading.Event()
 
     def life_loop() -> None:
+        nonlocal anchor
         last = time.monotonic()
         last_save = last
         while not stop.is_set():
@@ -96,9 +174,18 @@ def main() -> None:
             now = time.monotonic()
             try:
                 if human.body.alive:
-                    human.tick((now - last) * speed)
+                    if real_time_mode:
+                        delta = timeflow.target_sim_minutes(anchor) - human.body.sim_minutes
+                        if delta > 0:
+                            human.tick(delta)
+                    else:
+                        human.tick((now - last) * speed)
                 if now - last_save > 60:
                     human.save()
+                    if real_time_mode:
+                        anchor = timeflow.rebase(human.body.sim_minutes)
+                        human.memory.set_meta("time_anchor",
+                                              json.dumps(anchor.to_dict()))
                     last_save = now
             except Exception:
                 with print_lock:
@@ -109,6 +196,16 @@ def main() -> None:
 
     sim = threading.Thread(target=life_loop, daemon=True)
     sim.start()
+
+    if real_weather_enabled:
+        def weather_loop() -> None:
+            while not stop.is_set():
+                weather = fetch_real_weather(weather_lat, weather_lon)
+                if weather is not None and human.body.alive:
+                    human.set_real_weather(weather)
+                if stop.wait(WEATHER_POLL_SECONDS):
+                    break
+        threading.Thread(target=weather_loop, daemon=True).start()
 
     global show_thoughts
     try:
@@ -134,10 +231,14 @@ def main() -> None:
                         print(f"  [d{d} {mm//60:02d}:{mm%60:02d}] "
                               f"({m.kind}, imp {m.importance:.0f}) {m.text}")
             elif line.startswith("/speed"):
-                parts = line.split()
-                if len(parts) > 1:
-                    speed = max(0.1, min(60.0, float(parts[1])))
-                print(f"speed: {speed} sim-min per real second")
+                if real_time_mode:
+                    print(f"{name} lives in real time — /speed doesn't apply "
+                          '(set "time": {"mode": "sim"} in config.json to change this).')
+                else:
+                    parts = line.split()
+                    if len(parts) > 1:
+                        speed = max(0.1, min(60.0, float(parts[1])))
+                    print(f"speed: {speed} sim-min per real second")
             elif line == "/restock":
                 r = human.restock()
                 if r["bought"] > 0:
@@ -290,6 +391,9 @@ def main() -> None:
         pass
     finally:
         stop.set()
+        if real_time_mode and human.body.alive:
+            anchor = timeflow.rebase(human.body.sim_minutes)
+            human.memory.set_meta("time_anchor", json.dumps(anchor.to_dict()))
         human.save()
         print(f"\nsaved. {name} keeps existing between runs — memories and body "
               f"state persist in {STATE_DIR}/")

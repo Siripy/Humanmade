@@ -38,6 +38,33 @@ class TestWeather(unittest.TestCase):
         stormy.ambient_valence = -0.12
         self.assertGreater(sunny._instant_valence(), stormy._instant_valence())
 
+    def test_set_weather_changes_and_reports_event(self):
+        w = World()
+        w.weather = "sunny"
+        events = w.set_weather("stormy")
+        self.assertEqual(w.weather, "stormy")
+        self.assertEqual(events, ["outside, the weather turns stormy"])
+
+    def test_set_weather_no_op_when_unchanged(self):
+        w = World()
+        w.weather = "cloudy"
+        self.assertEqual(w.set_weather("cloudy"), [])
+
+    def test_set_weather_rejects_unknown_weather(self):
+        w = World()
+        w.weather = "sunny"
+        self.assertEqual(w.set_weather("blizzard"), [])
+        self.assertEqual(w.weather, "sunny")
+
+    def test_weather_locked_blocks_random_cycling(self):
+        w = World()
+        w.weather_locked = True
+        w.weather = "sunny"
+        for _ in range(60):
+            events = w.advance(720)
+            self.assertEqual(events, [])
+        self.assertEqual(w.weather, "sunny")
+
 
 class TestSickness(unittest.TestCase):
     def test_risk_rises_with_neglect_and_chill(self):
@@ -117,6 +144,50 @@ class TestMedicineOrder(unittest.TestCase):
             self.assertAlmostEqual(human.world.money, 20.0 - MEDICINE_PRICE)
             self.assertTrue(any("medicine" in m.text.lower()
                                 for m in human.memory.recent(5)))
+            human.memory.close()
+
+
+class TestRealWeatherOverride(unittest.TestCase):
+    def test_set_real_weather_locks_and_updates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            human, _, events = make_human(tmp)
+            human.llm_online = False
+            human.world.weather = "sunny"
+            human.set_real_weather("stormy")
+            self.assertTrue(human.world.weather_locked)
+            self.assertEqual(human.world.weather, "stormy")
+            self.assertTrue(any("stormy" in e for e in events))
+            human.memory.close()
+
+    def test_locked_weather_survives_a_tick(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            human, _, _ = make_human(tmp)
+            human.llm_online = False
+            human.set_real_weather("rainy")
+            for _ in range(20):
+                human.tick(60.0)
+            self.assertEqual(human.world.weather, "rainy")
+            human.memory.close()
+
+    def test_set_real_weather_is_a_no_op_when_dead(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            human, _, _ = make_human(tmp)
+            human.llm_online = False
+            human.body.alive = False
+            human.world.weather = "sunny"
+            human.set_real_weather("stormy")
+            self.assertFalse(human.world.weather_locked)
+            self.assertEqual(human.world.weather, "sunny")
+            human.memory.close()
+
+    def test_unknown_reading_leaves_weather_untouched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            human, _, _ = make_human(tmp)
+            human.llm_online = False
+            human.world.weather = "sunny"
+            human.set_real_weather("blizzard")
+            self.assertTrue(human.world.weather_locked)
+            self.assertEqual(human.world.weather, "sunny")
             human.memory.close()
 
 

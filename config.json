@@ -1,6 +1,14 @@
 {
   "speed": 1.0,
   "embed_interval_seconds": 5.0,
+  "time": {
+    "mode": "sim",
+    "weather": {
+      "real": false,
+      "latitude": null,
+      "longitude": null
+    }
+  },
   "llm": {
     "provider": "ollama",
     "base_url": "http://localhost:11434",

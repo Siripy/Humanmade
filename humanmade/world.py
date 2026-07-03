@@ -30,10 +30,13 @@ class World:
     air_quality: float = 100.0      # future: windows, smoke, etc.
     weather: str = "sunny"
     weather_minutes_left: float = 360.0
+    weather_locked: bool = False    # true when a real weather feed drives it
 
     def advance(self, minutes: float) -> list[str]:
         """Move the outside world along. Returns notable events."""
         events: list[str] = []
+        if self.weather_locked:
+            return events
         self.weather_minutes_left -= minutes
         if self.weather_minutes_left <= 0:
             new = random.choices(WEATHERS, weights=_WEATHER_WEIGHTS)[0]
@@ -42,6 +45,14 @@ class World:
                 self.weather = new
                 events.append(f"outside, the weather turns {new}")
         return events
+
+    def set_weather(self, new: str) -> list[str]:
+        """Directly set the weather (e.g. from a real feed). Returns a
+        'weather turns X' event if it actually changed."""
+        if new not in WEATHERS or new == self.weather:
+            return []
+        self.weather = new
+        return [f"outside, the weather turns {new}"]
 
     def weather_valence(self) -> float:
         """Small mood shift from the sky (Denissen et al. 2008)."""
