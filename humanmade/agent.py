@@ -24,6 +24,7 @@ import time
 from . import internet
 from .body import Body
 from .brain import ACTIONS, BrainError, LLMBrain, ReflexBrain
+from .creation import HOBBIES, HOBBY_KIND, FRAGMENT_NOUN, Work, WorksLibrary, craft_descriptor
 from .memory import MemoryStream
 from .personality import agent_knobs, body_knobs, derive_disposition
 from .world import World
@@ -32,8 +33,6 @@ FIRST_NAMES = ["June", "Theo", "Mara", "Elio", "Nadia", "Ravi", "Iris", "Sol",
                "Wren", "Kaito", "Zia", "Milan"]
 TRAITS = ["curious", "stubborn", "gentle", "sarcastic", "anxious", "playful",
           "philosophical", "impatient", "warm", "melancholic", "meticulous", "dreamy"]
-HOBBIES = ["writing a novel", "learning astronomy", "sketching birds",
-           "composing chiptune music", "studying dead languages", "whittling"]
 # chronotype -> (circadian offset hours, human-readable habit)
 CHRONOTYPES = {
     "lark": (2.0, "an early bird who wakes with the sun and fades by evening"),
@@ -71,6 +70,7 @@ def make_persona(name: str | None = None) -> dict:
     chronotype = random.choice(list(CHRONOTYPES))
     personality = ", ".join(random.sample(TRAITS, 3))
     loved, hated = random.sample(["sunny", "cloudy", "rainy", "stormy"], 2)
+    hobby = random.choice(HOBBIES)
     return {
         "name": name or random.choice(FIRST_NAMES),
         "age": random.randint(19, 74),
@@ -81,8 +81,10 @@ def make_persona(name: str | None = None) -> dict:
         "hates_weather": hated,
         "birthday_day": random.randint(1, 364),  # sim day-of-year
         "skills": {s: 5.0 for s in SKILLS},
+        "hobby": hobby,
+        "current_work_slug": None,
         "backstory": (f"Lives alone in a one-room apartment, spends time "
-                      f"{random.choice(HOBBIES)}. Has no memory of how they got here, "
+                      f"{hobby}. Has no memory of how they got here, "
                       "only that a companion beyond the screen looks after the world."),
     }
 
@@ -184,6 +186,10 @@ class Human:
         self._last_browse_sim = -10 ** 9
         self._browse_unavailable = False  # flips true once, if Playwright is missing
 
+        # what a life adds up to: real, accumulating creative work
+        self.works = WorksLibrary(state_dir)
+        self._creating = False
+
     def _apply_disposition(self) -> None:
         """Wire the persona's temperament into body and behavior parameters."""
         if "disposition" not in self.persona:  # backfill pre-personality saves
@@ -195,6 +201,10 @@ class Human:
             self.persona["hates_weather"] = hated
             self.persona.setdefault("birthday_day", random.randint(1, 364))
         self.persona.setdefault("skills", {s: 5.0 for s in SKILLS})
+        if "hobby" not in self.persona:  # backfill pre-hobby-field saves
+            self.persona["hobby"] = self.persona["backstory"].split(
+                "spends time ")[-1].split(".")[0]
+        self.persona.setdefault("current_work_slug", None)
         dims = self.persona["disposition"]["dimensions"]
         for knob, value in body_knobs(dims).items():
             setattr(self.body, knob, value)
@@ -329,14 +339,25 @@ class Human:
         with self.lock:
             return self.memory.recent(n, kinds=("journal",))
 
+    def current_work(self) -> Work | None:
+        with self.lock:
+            return self.works.load(self.persona.get("current_work_slug"))
+
+    def finished_works(self) -> list[Work]:
+        with self.lock:
+            return self.works.finished_works()
+
     def status_report(self) -> list[str]:
         with self.lock:
-            hobby = self.persona["backstory"].split("spends time ")[-1].split(".")[0]
+            hobby = self.persona["hobby"]
             skills = self.persona.get("skills", {})
+            work = self.works.load(self.persona.get("current_work_slug"))
+            title = f' — "{work.display_title}"' if work else ""
             return self.body.status_lines() + [
                 f"  fridge: {self.world.food_portions} portions · "
                 f"credits: {self.world.money:.0f} · weather: {self.world.weather}",
-                f"  {hobby}: {float(self.persona.get('hobby_progress', 0)):.0f}% done",
+                f"  {hobby}{title}: "
+                f"{float(self.persona.get('hobby_progress', 0)):.0f}% done",
                 "  skills: " + " · ".join(
                     f"{name} {float(level):.0f}" for name, level in skills.items())]
 
@@ -557,6 +578,82 @@ class Human:
                                 f"{label}. Practice is paying off.",
                                 self.body.sim_minutes, importance=7)
                 self._note_news(f"got noticeably better at {label}")
+
+    # -------------------------------------------------------------- creation
+
+    def _begin_creation_session(self, hobby: str, finishing: bool) -> None:
+        """A real writing/composing/carving session on a worker thread —
+        exactly one LLM call, which both extends the current Work and (when
+        `finishing`) brings it to a close. See creation.py for the Work
+        model and brain.py's create() for the actual prompt."""
+        if self._creating or not self.llm_online:
+            return
+        self._creating = True
+        slug = self.persona.get("current_work_slug")
+        work = self.works.load(slug)
+        if work is None:
+            work = Work(hobby=hobby, kind=HOBBY_KIND.get(hobby, "project"),
+                       title=None, synopsis="", started_sim=self.body.sim_minutes)
+            slug = self.works.new_slug(hobby, self.body.sim_minutes)
+            self.persona["current_work_slug"] = slug
+        kind = work.kind
+        fragment_noun = FRAGMENT_NOUN.get(kind, "piece")
+        descriptor = craft_descriptor(self.skill("craft"))
+        mood_label = self.body.mood()[1]
+        mood_context = f"feeling {mood_label}"
+        if self.emotion:
+            mood_context += f", a touch of {self.emotion}"
+        persona_snapshot = dict(self.persona)
+        synopsis = work.synopsis
+        life_id = self._life_id
+        day = self.body.day
+
+        def worker() -> None:
+            try:
+                result = self.llm.create(persona_snapshot, hobby, kind,
+                                         fragment_noun, descriptor, synopsis,
+                                         mood_context, finishing)
+            except Exception:
+                result = {"title": None, "fragment": None, "synopsis": synopsis}
+            with self.lock:
+                self._creating = False
+                if life_id != self._life_id:
+                    return
+                self._apply_creation_result(slug, work, day, result, finishing)
+
+        threading.Thread(target=worker, daemon=True, name="humanmade-create").start()
+
+    def _apply_creation_result(self, slug: str, work: Work, day: int,
+                               result: dict, finishing: bool) -> None:
+        fragment = result.get("fragment")
+        if not fragment:
+            return  # a quiet, uninspired session — nothing worth keeping
+        work.fragments.append({"day": day, "text": fragment})
+        if result.get("title") and not work.title:
+            work.title = result["title"]
+        work.synopsis = result.get("synopsis") or work.synopsis
+        excerpt = fragment if len(fragment) <= 220 else fragment[:217] + "..."
+        self.memory.add("creation", f'Wrote on "{work.display_title}": {excerpt}',
+                        self.body.sim_minutes, importance=6)
+
+        if finishing:
+            title = work.display_title
+            sale = round(20 + self.skill("craft") * 1.5, 1)
+            work.status = "finished"
+            work.finished_sim = self.body.sim_minutes
+            work.sale_price = sale
+            self.works.save(work, slug)
+            self.persona["current_work_slug"] = None
+            self.world.money += sale
+            self._feel("pride", 1.0)
+            self.on_event(f'({self.persona["name"]} finished "{title}" — and sold '
+                          f"it for {sale:.0f} credits)")
+            self.memory.add("event", f'I finished "{title}". It sold for '
+                            f"{sale:.0f} credits. Already dreaming up the next one.",
+                            self.body.sim_minutes, importance=9)
+            self._note_news(f'finished "{title}"!')
+        else:
+            self.works.save(work, slug)
 
     # ------------------------------------------------------------ daily rhythm
 
@@ -1172,7 +1269,7 @@ class Human:
             b.fun = min(100.0, b.fun + 10)
             wage = self.world.earn(1.0 + self.skill("craft") / 100.0)  # mastery pays
             self._practice("craft", 0.9)
-            hobby = self.persona["backstory"].split("spends time ")[-1].split(".")[0]
+            hobby = self.persona["hobby"]
             narration = (f"works on {hobby} and earns {wage:.0f} credits "
                          f"({self.world.money:.0f} saved)")
             old = float(self.persona.get("hobby_progress", 0.0))
@@ -1187,16 +1284,21 @@ class Human:
                                     "It's really taking shape.", b.sim_minutes,
                                     importance=7)
                     self._note_news(f"made real progress on {hobby} ({milestone}%)")
-            if new >= 100:
+            finishing = new >= 100
+            if finishing:
                 new = 0.0
-                self._feel("pride", 1.0)
-                self.on_event(f"({self.persona['name']} FINISHED {hobby}! "
-                              "Already dreaming up the next one.)")
-                self.memory.add("event", f"I FINISHED {hobby} today. I actually "
-                                "finished it. Starting the next one soon.",
-                                b.sim_minutes, importance=9)
-                self._note_news(f"finished {hobby}!")
+                if not self.llm_online:
+                    # no creation session will run to give this a real
+                    # ending — fall back to the old, simple announcement
+                    self._feel("pride", 1.0)
+                    self.on_event(f"({self.persona['name']} FINISHED {hobby}! "
+                                  "Already dreaming up the next one.)")
+                    self.memory.add("event", f"I FINISHED {hobby} today. I "
+                                    "actually finished it. Starting the next "
+                                    "one soon.", b.sim_minutes, importance=9)
+                    self._note_news(f"finished {hobby}!")
             self.persona["hobby_progress"] = new
+            self._begin_creation_session(hobby, finishing)
         elif action == "browse":
             can_go = (self.internet_enabled and not self._browse_unavailable
                      and self.llm_online and b.sim_minutes - self._last_browse_sim
@@ -1268,11 +1370,16 @@ class Human:
             self._think_outcome = None
             self._reflecting = False
             self.memory.close()
+            stamp = time.strftime("%Y%m%d-%H%M%S")
             old = os.path.join(self.state_dir, "memory.sqlite3")
             if os.path.exists(old):
-                stamp = time.strftime("%Y%m%d-%H%M%S")
                 os.rename(old, os.path.join(self.state_dir, f"memory-{stamp}.sqlite3"))
             self.memory = MemoryStream(old)
+            works_dir = os.path.join(self.state_dir, "works")
+            if os.path.isdir(works_dir) and os.listdir(works_dir):
+                os.rename(works_dir, os.path.join(self.state_dir, f"works-{stamp}"))
+            self.works = WorksLibrary(self.state_dir)
+            self._creating = False
             self.body, self.world = Body(), World()
             self.persona = make_persona()
             offset, _ = CHRONOTYPES.get(self.persona["chronotype"], (0.0, ""))

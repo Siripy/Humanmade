@@ -51,6 +51,8 @@ server's `base_url` in `config.json`. `OLLAMA_HOST` is honored when
 | `/journal [n]` | read its private diary (written at bedtime) |
 | `/medicine` | order medicine when it's sick — paid from its credits |
 | `/web [n]` | what it's read online recently (needs `internet.enabled`) |
+| `/read` | the piece it's currently working on, and how far along it is |
+| `/works` | the library of everything it's ever finished and sold |
 | `/speed <n>` | sim-minutes per real second (default 1) |
 | `/thoughts` | toggle the inner monologue |
 | `/newlife` | after a death, a new person is born (old memories archived) |
@@ -146,6 +148,14 @@ it end to end against a local mock website, no real network required.
   Meanwhile its hobby genuinely progresses: `work` advances the novel/sketches/music
   through milestones it's proud to tell you about, and each night before sleep it
   writes a **private diary entry** you can read with `/journal`.
+- **Real, accumulating creative work** (`humanmade/creation.py`) — the hobby isn't
+  a progress bar. Each `work` session, the LLM writes an actual fragment — a novel
+  chapter, a stargazing-log entry, a sketchbook page, a track, a translation, a
+  carved figure — voiced at its *actual* craft skill (rough work reads rough) and
+  colored by how it's actually been feeling. `/read` shows the work in progress;
+  finishing one titles it, sells it for real credits, and archives it — `/works`
+  is the library of everything it's ever finished. Files live in `state/works/`,
+  genuinely readable outside the app.
 - **Attachment** (`humanmade/agent.py`) — the human tracks whether you're present.
   When you leave it registers the separation, feels your absence, and queues up news;
   when you return it greets you first, its warmth scaled by how long you were gone.
@@ -316,8 +326,9 @@ retrieval and persistence, decision parsing, reflex priorities, asynchronous
 thinking, LLM-failure fallback, reincarnation, the behavior layer (chronotype,
 emotional inertia, dreams, overnight consolidation, daily planning, the
 away/return reunion flow), the credit economy, semantic memory embeddings,
-conversation compression, first-run naming, and — when
-[Playwright](https://playwright.dev/) is installed — real browsing (viewport-only
-sight, link-following, scrolling, the read-only safety layer, and the full
-browse-action lifecycle) against the local mock website, with zero real network
-access.
+conversation compression, first-run naming, real creative-work sessions
+(fragment writing, titling, completion and sale, cross-life archiving), and —
+when [Playwright](https://playwright.dev/) is installed — real browsing
+(viewport-only sight, link-following, scrolling, the read-only safety layer, and
+the full browse-action lifecycle) against the local mock website, with zero real
+network access.

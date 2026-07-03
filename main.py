@@ -13,7 +13,8 @@ Commands:
   /plan          see today's plan        /dream        recall last night's dream
   /journal [n]   read its diary          /medicine     order medicine when sick
   /bond          how it feels about you  /habits       its learned routine
-  /web [n]       what it's read online   /newlife      start a new person
+  /web [n]       what it's read online   /read         its work in progress
+  /works         its finished creations  /newlife      start a new person
   /quit          save and exit
 """
 
@@ -180,6 +181,30 @@ def main() -> None:
                     else:
                         print(f"{name}'s diary is still blank "
                               "(entries are written at bedtime, LLM brain online).")
+            elif line == "/read":
+                work = human.current_work()
+                with print_lock:
+                    if not work:
+                        print(f"{name} hasn't started a project yet.")
+                    else:
+                        print(f'"{work.display_title}" ({work.kind}) — '
+                              f"{len(work.fragments)} piece"
+                              f"{'s' if len(work.fragments) != 1 else ''} so far")
+                        if work.synopsis:
+                            print(f"  so far: {work.synopsis}")
+                        if work.fragments:
+                            print(f"  most recent piece:\n"
+                                  f"  {work.fragments[-1]['text']}")
+            elif line == "/works":
+                works = human.finished_works()
+                with print_lock:
+                    if not works:
+                        print(f"{name} hasn't finished anything yet.")
+                    else:
+                        for w in works:
+                            d = int((w.finished_sim or 0) // 1440)
+                            print(f'  [day {d}] "{w.display_title}" ({w.kind}) — '
+                                  f"sold for {w.sale_price:.0f} credits")
             elif line.startswith("/web"):
                 parts = line.split()
                 n = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 5

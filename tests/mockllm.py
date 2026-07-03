@@ -33,6 +33,8 @@ def fake_embedding(text: str) -> list[float]:
 DEFAULT_GAZE = {"move": "done", "target": None, "remark": None}
 DEFAULT_WEB_DIGEST = {"summary": "Looked at a page for a bit.", "share": None,
                       "emotion": "curious", "fact_learned": None}
+DEFAULT_CREATION = {"title": "Untitled", "fragment": "A few honest lines, "
+                    "written for their own sake.", "synopsis": "A work in progress."}
 
 
 def start_mock_ollama(decision: dict | None = None,
@@ -42,6 +44,7 @@ def start_mock_ollama(decision: dict | None = None,
                       journal: str | None = None,
                       gaze_script: list[dict] | None = None,
                       web_digest: dict | None = None,
+                      creation_script: list[dict] | None = None,
                       delay: float = 0.0) -> tuple[HTTPServer, str]:
     """Serve Ollama-shaped /api/chat and /api/tags on an ephemeral port.
 
@@ -51,6 +54,8 @@ def start_mock_ollama(decision: dict | None = None,
     a glance at a page ("looking at a webpage") -> the next entry of
     gaze_script (popped in order; repeats the last/default once exhausted),
     the end of a browsing session ("just finished browsing") -> web_digest,
+    a creative-work session ("simulated human working on") -> the next
+    entry of creation_script (same pop-in-order/repeat-last rule),
     everything else -> decision. `delay` adds thinking latency to chat
     responses (availability probes stay fast). Returns (server, base_url);
     caller should srv.stop() when done.
@@ -64,13 +69,15 @@ def start_mock_ollama(decision: dict | None = None,
                                                    "small, but I got things done.")
     gaze_script = list(gaze_script) if gaze_script is not None else [DEFAULT_GAZE]
     web_digest = web_digest if web_digest is not None else DEFAULT_WEB_DIGEST
-    gaze_lock = threading.Lock()
+    creation_script = (list(creation_script) if creation_script is not None
+                       else [DEFAULT_CREATION])
+    script_lock = threading.Lock()
 
-    def next_gaze() -> dict:
-        with gaze_lock:
-            if len(gaze_script) > 1:
-                return gaze_script.pop(0)
-            return gaze_script[0] if gaze_script else DEFAULT_GAZE
+    def _pop_or_repeat(script: list[dict], default: dict) -> dict:
+        with script_lock:
+            if len(script) > 1:
+                return script.pop(0)
+            return script[0] if script else default
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):  # keep test output clean
@@ -103,9 +110,11 @@ def start_mock_ollama(decision: dict | None = None,
             elif "diary entry" in system:
                 content = json.dumps({"entry": journal})
             elif "looking at a webpage" in system:
-                content = json.dumps(next_gaze())
+                content = json.dumps(_pop_or_repeat(gaze_script, DEFAULT_GAZE))
             elif "just finished browsing" in system:
                 content = json.dumps(web_digest)
+            elif "simulated human working on" in system:
+                content = json.dumps(_pop_or_repeat(creation_script, DEFAULT_CREATION))
             else:
                 content = json.dumps(decision)
             self._respond(json.dumps(

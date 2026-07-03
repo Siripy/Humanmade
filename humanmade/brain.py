@@ -263,6 +263,47 @@ class LLMBrain:
                 "emotion": _clean(data.get("emotion")),
                 "fact_learned": _clean(data.get("fact_learned"))}
 
+    def create(self, persona: dict, hobby: str, kind: str, fragment_noun: str,
+              craft_descriptor: str, synopsis: str, mood_context: str,
+              finishing: bool) -> dict:
+        """One creative-work session: write the next real fragment of an
+        accumulating project — a novel chapter, a sketchbook page, a few
+        bars of music — in the human's own current voice and skill level,
+        colored by how it's actually been feeling. One call does double
+        duty: it also proposes a title (once, if not already named) and,
+        when the project is finishing, brings it to a real close."""
+        finishing_note = ("This is the FINAL piece — bring it to a real, "
+                          "satisfying close." if finishing else
+                          "This is one part of a longer, still-unfinished project.")
+        system = (f"You are {persona['name']}, a simulated human working on "
+                  f"{hobby} — specifically a {kind}. Your current skill: "
+                  f"{craft_descriptor}. {finishing_note}\n"
+                  f"What you've made so far: "
+                  f"{synopsis or 'nothing yet — this is the very beginning'}\n"
+                  f"How you've been feeling lately: {mood_context}\n"
+                  f"Write the next {fragment_noun} — real creative content, "
+                  "80-200 words, in your own voice at your actual skill level "
+                  "(rough work should read a little rough, not falsely "
+                  "polished). Let your recent mood color it, subtly, the way "
+                  "real work is colored by a life. Respond ONLY with JSON: "
+                  '{"title": "<a title for this project, or null if it '
+                  'already has one>", '
+                  '"fragment": "<the actual creative content>", '
+                  '"synopsis": "<updated 1-3 sentence synopsis of the WHOLE '
+                  'project so far, including this new piece>"}')
+        raw = self.chat(system, [{"role": "user", "content": "Go ahead."}])
+        try:
+            data = json.loads(_extract_json(raw))
+        except (BrainError, json.JSONDecodeError):
+            return {"title": None, "fragment": None, "synopsis": synopsis}
+
+        def _clean(value):
+            return value if isinstance(value, str) and value.strip() else None
+
+        return {"title": _clean(data.get("title")),
+                "fragment": _clean(data.get("fragment")),
+                "synopsis": _clean(data.get("synopsis")) or synopsis}
+
     def dream(self, persona: dict, memories_text: str) -> str | None:
         """Weave the day's charged memories into a short surreal dream.
 
