@@ -31,7 +31,8 @@ ACTIONS = {
 }
 
 SYSTEM_PROMPT = """You are the inner mind of {name}, a simulated human being — NOT an AI assistant.
-{name} is {age} years old. Personality: {personality}. Backstory: {backstory}
+{name} is {age} years old. Personality: {personality}. Temperament: {temperament}.
+Backstory: {backstory}
 
 You live in a small apartment. A companion (the person at the keyboard) watches over
 your world; they are your only social contact and the only one who can restock your
@@ -141,9 +142,12 @@ class LLMBrain:
 
     def decide(self, persona: dict, context: str,
                conversation: list[dict]) -> dict:
+        temperament = persona.get("disposition", {}).get(
+            "description", "fairly even-keeled")
         system = SYSTEM_PROMPT.format(
             name=persona["name"], age=persona["age"],
-            personality=persona["personality"], backstory=persona["backstory"],
+            personality=persona["personality"], temperament=temperament,
+            backstory=persona["backstory"],
             actions=", ".join(ACTIONS),
         )
         messages = conversation[-12:] + [{"role": "user", "content": context}]
@@ -268,7 +272,7 @@ class ReflexBrain:
             (world.food_portions <= 1 and not world.can_afford(4)
              and body.energy > 30,
              "work", "fridge is nearly empty and I'm broke — better earn"),
-            (body.hygiene < 30, "shower", "I need a shower"),
+            (body.hygiene < body.hygiene_standard, "shower", "I need a shower"),
             (body.fun < 25, "relax", "I need a break"),
         ]
         for cond, action, thought in rules:

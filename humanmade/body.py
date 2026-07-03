@@ -62,6 +62,13 @@ class Body:
     # Ambient mood shift from the environment (weather), set by the agent.
     ambient_valence: float = 0.0
 
+    # Personality knobs (set from the persona's disposition; see personality.py)
+    neg_reactivity: float = 1.0     # how hard bad feelings land
+    pos_reactivity: float = 1.0     # how quickly good feelings return
+    social_decay_mult: float = 1.0  # extraverts drain faster
+    fun_decay_mult: float = 1.0     # the novelty-hungry bore faster
+    hygiene_standard: float = 30.0  # below this, it wants a shower
+
     # Emotional inertia (Koval & Kuppens): mood is autocorrelated, so it lags
     # need-satisfaction rather than snapping to it. Smoothed over ~90 sim-min.
     valence_smoothed: float = 0.0
@@ -143,8 +150,9 @@ class Body:
                                 * (0.7 + 0.6 * self.circadian_sleep_drive()))
             self.satiety = clamp(self.satiety - 0.055 * minutes * exertion)
             self.hydration = clamp(self.hydration - 0.023 * minutes * exertion)
-            self.fun = clamp(self.fun - (0.06 if activity == "idle" else 0.02) * minutes)
-            self.social = clamp(self.social - 0.035 * minutes)
+            self.fun = clamp(self.fun - (0.06 if activity == "idle" else 0.02)
+                             * minutes * self.fun_decay_mult)
+            self.social = clamp(self.social - 0.035 * minutes * self.social_decay_mult)
             self.hygiene = clamp(self.hygiene - 0.045 * minutes * exertion)
 
         # Waste production tracks intake/metabolism
@@ -161,10 +169,14 @@ class Body:
         return events
 
     def _update_mood(self, minutes: float) -> None:
-        # Exponential smoothing toward instant valence (emotional inertia).
+        # Exponential smoothing toward instant valence (emotional inertia),
+        # asymmetric by temperament: for the neurotic, bad feelings arrive
+        # fast and leave slowly; for the resilient, the reverse.
         alpha = 1.0 - math.exp(-minutes / self.VALENCE_TAU_MIN)
         target = self._instant_valence()
-        self.valence_smoothed += alpha * (target - self.valence_smoothed)
+        reactivity = (self.neg_reactivity if target < self.valence_smoothed
+                      else self.pos_reactivity)
+        self.valence_smoothed += min(1.0, alpha * reactivity) * (target - self.valence_smoothed)
 
     def nudge_mood(self, delta: float) -> None:
         """Apply an immediate emotional jolt (a reunion, a fright) on top of

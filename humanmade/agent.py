@@ -24,6 +24,7 @@ import time
 from .body import Body
 from .brain import BrainError, LLMBrain, ReflexBrain
 from .memory import MemoryStream
+from .personality import agent_knobs, body_knobs, derive_disposition
 from .world import World
 
 FIRST_NAMES = ["June", "Theo", "Mara", "Elio", "Nadia", "Ravi", "Iris", "Sol",
@@ -52,10 +53,12 @@ REUNION_GAP_MINUTES = 20.0     # sim-min apart that counts as a real separation
 
 def make_persona(name: str | None = None) -> dict:
     chronotype = random.choice(list(CHRONOTYPES))
+    personality = ", ".join(random.sample(TRAITS, 3))
     return {
         "name": name or random.choice(FIRST_NAMES),
         "age": random.randint(19, 74),
-        "personality": ", ".join(random.sample(TRAITS, 3)),
+        "personality": personality,
+        "disposition": derive_disposition(personality),
         "chronotype": chronotype,
         "backstory": (f"Lives alone in a one-room apartment, spends time "
                       f"{random.choice(HOBBIES)}. Has no memory of how they got here, "
@@ -92,6 +95,7 @@ class Human:
         offset, _ = CHRONOTYPES.get(self.persona.get("chronotype", "intermediate"),
                                     (0.0, ""))
         self.body.chronotype_offset_hours = offset
+        self._apply_disposition()
 
         # daily life: plan, dreams, sleep bookkeeping
         self.today_plan: list[str] = json.loads(self.memory.get_meta("plan", "[]"))
@@ -125,6 +129,18 @@ class Human:
         self._embed_interval = float(config.get("embed_interval_seconds", 5.0))
         threading.Thread(target=self._embed_loop, daemon=True,
                          name="humanmade-hippocampus").start()
+
+    def _apply_disposition(self) -> None:
+        """Wire the persona's temperament into body and behavior parameters."""
+        if "disposition" not in self.persona:  # backfill pre-personality saves
+            self.persona["disposition"] = derive_disposition(
+                self.persona.get("personality", ""))
+        dims = self.persona["disposition"]["dimensions"]
+        for knob, value in body_knobs(dims).items():
+            setattr(self.body, knob, value)
+        knobs = agent_knobs(dims)
+        self.plan_adherence = knobs["plan_adherence"]
+        self.speak_up_threshold = knobs["speak_up_threshold"]
 
     # ------------------------------------------------------------ persistence
 
@@ -506,7 +522,7 @@ class Human:
             lines.append(f"You are alone; your companion has been gone about "
                          f"{apart:.1f} hours. You can't speak to them until they "
                          f"return — but you can think, feel their absence, and live.")
-        elif b.social < 30:
+        elif b.social < self.speak_up_threshold:
             lines.append("You haven't spoken to anyone in a long while. If you have "
                          "something to say or ask, say it — no one will prompt you.")
         return lines
@@ -783,6 +799,7 @@ class Human:
             self.persona = make_persona()
             offset, _ = CHRONOTYPES.get(self.persona["chronotype"], (0.0, ""))
             self.body.chronotype_offset_hours = offset
+            self._apply_disposition()
             self.conversation.clear()
             self.inbox.clear()
             self.current_action = "idle"
