@@ -123,6 +123,23 @@ a low `/speed` and it'll have a day's worth of life — and a dream — to recou
 - **Attachment** (`humanmade/agent.py`) — the human tracks whether you're present.
   When you leave it registers the separation, feels your absence, and queues up news;
   when you return it greets you first, its warmth scaled by how long you were gone.
+- **Personality** (`humanmade/personality.py`) — traits change the machinery, not
+  just the prose: the anxious feel bad news harder and longer, extraverts drain
+  their social battery faster, the meticulous shower sooner and stick to their
+  plans, the dreamy procrastinate ("one more chapter…"). Each person also has a
+  chronotype, a favorite and a hated kind of weather, and a birthday.
+- **A relationship that develops** — trust and closeness grow with conversation and
+  care (groceries, medicine) and erode with abandonment. Disclosure follows
+  closeness: small talk from a stranger, real feelings from a friend. It keeps
+  notes on what it learns about *you*, remembers questions you never answered and
+  follows up, and marks anniversaries of the day you met. `/bond` shows where you
+  stand.
+- **Emotions, not just mood** — events are appraised into discrete feelings (pride
+  at a milestone, gratitude for medicine, joy at reunion, shame after an accident,
+  worry, frustration, hurt) that color its thoughts while they last, on top of the
+  slow-moving mood. Repeated pleasures dull (hedonic adaptation), comfort eating
+  happens on bad days, and old trivial memories blur together into summaries the
+  way real weeks do.
 
 ## Research notes
 
@@ -164,6 +181,17 @@ The design borrows from actual human-behavior literature:
 - **Expressive writing** (Pennebaker): putting the day into words is how people
   process it — the nightly diary entry doubles as high-quality memory material for
   later reflection and retrieval.
+- **Big Five trait theory**: personality dimensions modulate concrete parameters —
+  neuroticism drives asymmetric mood reactivity (Koval's inertia work), extraversion
+  the social drain, conscientiousness the hygiene standard and plan adherence.
+- **Social penetration theory** (Altman & Taylor, 1973): relationships deepen
+  through gradual, reciprocal self-disclosure — modeled as trust/closeness state
+  that gates how much the human opens up.
+- **Appraisal theory of emotion** (OCC model): emotions arise from evaluating
+  events against goals — implemented as event-appraised discrete feelings with
+  decaying intensity, layered over mood.
+- **Hedonic adaptation** (Brickman & Campbell): repeated pleasures yield
+  diminishing returns, pushing variety-seeking.
 
 Sources: [Walker & van der Helm, "Overnight therapy?"](https://pubmed.ncbi.nlm.nih.gov/19702380/) ·
 [Berkeley News on REM and painful memories](https://news.berkeley.edu/2011/11/23/dream-sleep/) ·

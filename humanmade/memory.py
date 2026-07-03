@@ -231,5 +231,36 @@ class MemoryStream:
             self.db.commit()
         return softened
 
+    # ---------------------------------------------------------- consolidation
+
+    def consolidate(self, before_sim_minutes: float,
+                    min_batch: int = 40) -> str | None:
+        """Human memory is not a tape: old trivial moments blur together.
+
+        Low-importance observations/thoughts older than the cutoff are
+        replaced by a single summary memory. Important, emotional, and
+        relational memories are never touched. Returns the summary text, or
+        None if there wasn't enough to blur.
+        """
+        rows = self.db.execute(
+            "SELECT id, kind FROM memories WHERE sim_minutes < ? "
+            "AND importance <= 3.5 AND kind IN ('observation', 'thought')",
+            (before_sim_minutes,)).fetchall()
+        if len(rows) < min_batch:
+            return None
+        counts: dict[str, int] = {}
+        for _, kind in rows:
+            counts[kind] = counts.get(kind, 0) + 1
+        ids = [r[0] for r in rows]
+        self.db.execute(
+            f"DELETE FROM memories WHERE id IN ({','.join('?' * len(ids))})", ids)
+        detail = " and ".join(f"{n} small {k}s" for k, n in sorted(counts.items()))
+        summary = (f"an older stretch of days blurs together — {detail}, "
+                   "mostly routine")
+        self.add("summary", summary.capitalize() + ".", before_sim_minutes,
+                 importance=4)
+        self.db.commit()
+        return summary
+
     def close(self) -> None:
         self.db.close()

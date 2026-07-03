@@ -62,12 +62,16 @@ EMOTION_VALENCE = {
 def make_persona(name: str | None = None) -> dict:
     chronotype = random.choice(list(CHRONOTYPES))
     personality = ", ".join(random.sample(TRAITS, 3))
+    loved, hated = random.sample(["sunny", "cloudy", "rainy", "stormy"], 2)
     return {
         "name": name or random.choice(FIRST_NAMES),
         "age": random.randint(19, 74),
         "personality": personality,
         "disposition": derive_disposition(personality),
         "chronotype": chronotype,
+        "loves_weather": loved,
+        "hates_weather": hated,
+        "birthday_day": random.randint(1, 364),  # sim day-of-year
         "backstory": (f"Lives alone in a one-room apartment, spends time "
                       f"{random.choice(HOBBIES)}. Has no memory of how they got here, "
                       "only that a companion beyond the screen looks after the world."),
@@ -126,6 +130,12 @@ class Human:
         self.emotion_intensity = 0.0
         self._evening_indulged = False   # bedtime procrastination, once/night
 
+        # a question it asked you that you never answered
+        self.pending_question = json.loads(
+            self.memory.get_meta("pending_question", "null"))
+        # variety-seeking: recent leisure choices lose their shine
+        self._recent_actions: list[str] = []
+
         # the relationship itself develops (social penetration theory)
         self.bond = json.loads(self.memory.get_meta("bond", "null")) or {
             "trust": 40.0, "closeness": 20.0,
@@ -156,6 +166,11 @@ class Human:
         if "disposition" not in self.persona:  # backfill pre-personality saves
             self.persona["disposition"] = derive_disposition(
                 self.persona.get("personality", ""))
+        if "loves_weather" not in self.persona:  # backfill preferences/birthday
+            loved, hated = random.sample(["sunny", "cloudy", "rainy", "stormy"], 2)
+            self.persona["loves_weather"] = loved
+            self.persona["hates_weather"] = hated
+            self.persona.setdefault("birthday_day", random.randint(1, 364))
         dims = self.persona["disposition"]["dimensions"]
         for knob, value in body_knobs(dims).items():
             setattr(self.body, knob, value)
@@ -189,6 +204,8 @@ class Human:
             self.memory.set_meta("plan", json.dumps(self.today_plan))
             self.memory.set_meta("plan_day", str(self.plan_day_index))
             self.memory.set_meta("bond", json.dumps(self.bond))
+            self.memory.set_meta("pending_question",
+                                 json.dumps(self.pending_question))
             if self.last_dream:
                 self.memory.set_meta("last_dream", self.last_dream)
 
@@ -222,6 +239,7 @@ class Human:
                     self._bond_adjust(trust=-3.0, closeness=-1.0)
             self.companion_present = True
             self.last_seen_sim = self.body.sim_minutes
+            self.pending_question = None   # any reply counts as being heard
             self.inbox.append(text)
             self.body.social = min(100.0, self.body.social + 18)
             self._bond_adjust(closeness=0.4)
@@ -307,7 +325,12 @@ class Human:
 
             # the outside world moves, and the body feels it
             self.body.chill = self.world.chill_factor()
-            self.body.ambient_valence = self.world.weather_valence()
+            ambient = self.world.weather_valence()
+            if self.world.weather == self.persona.get("loves_weather"):
+                ambient += 0.06     # their kind of sky
+            elif self.world.weather == self.persona.get("hates_weather"):
+                ambient -= 0.06
+            self.body.ambient_valence = ambient
             for e in self.world.advance(sim_minutes):
                 self.on_event(e)
                 self.memory.add("observation", e, self.body.sim_minutes,
@@ -429,6 +452,26 @@ class Human:
                     f"{milestone} days now. Strange and nice to count it.",
                     self.body.sim_minutes, importance=8)
                 self._note_news(f"realized it's been {milestone} days since we met")
+
+        # birthday: a year older, whether you like it or not
+        if (self.body.day % 365 == self.persona.get("birthday_day", -1)
+                and self.persona.get("last_birthday_on") != self.body.day):
+            self.persona["last_birthday_on"] = self.body.day
+            self.persona["age"] = int(self.persona.get("age", 30)) + 1
+            self._feel("joy", 0.6)
+            self.memory.add("event", f"Today is my birthday. I'm "
+                            f"{self.persona['age']} now.", self.body.sim_minutes,
+                            importance=9)
+            self._note_news(f"it's my birthday — I turned {self.persona['age']}")
+            self.on_event(f"(it's {self.persona['name']}'s birthday — "
+                          f"{self.persona['age']} today)")
+
+        # old trivial days blur together (consolidation keeps memory human-sized)
+        if self.body.day >= 8:
+            summary = self.memory.consolidate(
+                before_sim_minutes=self.body.sim_minutes - 7 * 1440)
+            if summary:
+                self.on_event(f"({summary})")
 
     # --------------------------------------------------------- sleep & dreams
 
@@ -580,6 +623,11 @@ class Human:
 
         if self.today_plan and self.plan_day_index == b.day:
             lines.append("Today's plan: " + "; ".join(self.today_plan))
+        if self.world.weather == self.persona.get("loves_weather"):
+            lines.append(f"It's {self.world.weather} — your favorite kind of sky.")
+        elif self.world.weather == self.persona.get("hates_weather"):
+            lines.append(f"It's {self.world.weather} — you've always hated "
+                         f"{self.world.weather} days.")
         if self.last_dream and not b.asleep and b.awake_minutes < 120:
             lines.append(f"You just woke; last night you dreamt: {self.last_dream} "
                          "You might mention it if it feels worth sharing.")
@@ -632,6 +680,13 @@ class Human:
                              + "; ".join(self.pending_news))
             self._reunion_gap = None
             self.pending_news.clear()
+        if (self.pending_question and self.companion_present
+                and b.sim_minutes - self.pending_question["sim"] > 8 * 60):
+            lines.append(f'Earlier you asked them: "{self.pending_question["text"]}" '
+                         "— they never answered. You might gently follow up.")
+            if not self.pending_question["hurt_felt"]:
+                self.pending_question["hurt_felt"] = True
+                self._feel("hurt", 0.4)
         if self.inbox:
             for msg in self.inbox:
                 lines.append(f'Your companion just said: "{msg}"')
@@ -730,6 +785,14 @@ class Human:
                                     "URGENT:"))]
         return "\n".join(keep) or perception.split("\n", 1)[0]
 
+    def _novelty(self, action: str) -> float:
+        """Hedonic adaptation: the fourth book of the day restores less fun
+        than the first. Returns a 0.4-1.0 multiplier and records the choice."""
+        repeats = self._recent_actions.count(action)
+        self._recent_actions.append(action)
+        self._recent_actions = self._recent_actions[-4:]
+        return max(0.4, 1.0 - 0.25 * repeats)
+
     def _survival_override(self, decision: dict) -> dict:
         """The brainstem vetoes a negligent cortex. If a need has reached a
         dying/bursting threshold and the mind chose something else, instinct
@@ -800,6 +863,10 @@ class Human:
         if decision["say"]:
             if self.companion_present:
                 self.on_speak(decision["say"])
+                if "?" in decision["say"]:
+                    self.pending_question = {"text": decision["say"],
+                                             "sim": self.body.sim_minutes,
+                                             "hurt_felt": False}
                 self.memory.add("conversation", f'I said: "{decision["say"]}"',
                                 self.body.sim_minutes, importance=decision["importance"])
             else:
@@ -859,9 +926,13 @@ class Human:
             if b.asleep:
                 b.wake_up(); narration = "gets out of bed"
         elif action == "exercise":
-            b.fun = min(100.0, b.fun + 15); narration = "works out with the dumbbells"
+            b.fun = min(100.0, b.fun + 15 * self._novelty(action))
+            narration = "works out with the dumbbells"
         elif action == "relax":
-            b.fun = min(100.0, b.fun + 25); narration = "curls up with a book"
+            gain = 25 * self._novelty(action)
+            b.fun = min(100.0, b.fun + gain)
+            narration = ("curls up with a book" if gain > 15 else
+                         "flips through a book, restless — it's not landing today")
         elif action == "work":
             b.fun = min(100.0, b.fun + 10)
             wage = self.world.earn(1.0)
@@ -980,6 +1051,10 @@ class Human:
                          "first_met_sim": self.body.sim_minutes,
                          "last_anniversary_days": 0.0}
             self._last_day = self.body.day
+            self.pending_question = None
+            self._recent_actions.clear()
+            self.emotion, self.emotion_intensity = None, 0.0
+            self._evening_indulged = False
             self.memory.set_meta("persona", json.dumps(self.persona))
             self.memory.add("event", f"{self.persona['name']} came into existence.",
                             self.body.sim_minutes, importance=10)
