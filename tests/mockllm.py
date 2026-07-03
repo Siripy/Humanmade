@@ -39,6 +39,8 @@ DEFAULT_CREATION = {"title": "Untitled", "fragment": "A few honest lines, "
 
 def start_mock_ollama(decision: dict | None = None,
                       insights: list[str] | None = None,
+                      self_view: str | None = None,
+                      biography: str | None = None,
                       dream: str | None = None,
                       plan: list[str] | None = None,
                       journal: str | None = None,
@@ -49,19 +51,22 @@ def start_mock_ollama(decision: dict | None = None,
     """Serve Ollama-shaped /api/chat and /api/tags on an ephemeral port.
 
     Requests are routed by a keyword in the system prompt: reflection
-    ("reflective mind") -> insights, dreaming ("dreaming mind") -> dream,
-    planning ("loose plan") -> plan, diary ("diary entry") -> journal,
-    a glance at a page ("looking at a webpage") -> the next entry of
-    gaze_script (popped in order; repeats the last/default once exhausted),
-    the end of a browsing session ("just finished browsing") -> web_digest,
-    a creative-work session ("simulated human working on") -> the next
-    entry of creation_script (same pop-in-order/repeat-last rule),
+    ("reflective mind") -> {insights, self_view}, dreaming ("dreaming
+    mind") -> dream, planning ("loose plan") -> plan, diary ("diary
+    entry") -> journal, a glance at a page ("looking at a webpage") -> the
+    next entry of gaze_script (popped in order; repeats the last/default
+    once exhausted), the end of a browsing session ("just finished
+    browsing") -> web_digest, a creative-work session ("simulated human
+    working on") -> the next entry of creation_script (same pop/repeat
+    rule), a life story ("writing your own life story") -> biography,
     everything else -> decision. `delay` adds thinking latency to chat
     responses (availability probes stay fast). Returns (server, base_url);
     caller should srv.stop() when done.
     """
     decision = decision or DEFAULT_DECISION
     insights = insights if insights is not None else []
+    biography = biography if biography is not None else (
+        "It began quietly, and it is still, mostly, quiet.")
     dream = dream if dream is not None else "I was falling through a warm dark sky."
     plan = plan if plan is not None else ["eat breakfast", "work on my hobby",
                                           "reach out to my companion"]
@@ -102,7 +107,7 @@ def start_mock_ollama(decision: dict | None = None,
                 return
             system = body["messages"][0]["content"]
             if "reflective mind" in system:
-                content = json.dumps({"insights": insights})
+                content = json.dumps({"insights": insights, "self_view": self_view})
             elif "dreaming mind" in system:
                 content = json.dumps({"dream": dream})
             elif "loose plan" in system:
@@ -115,6 +120,8 @@ def start_mock_ollama(decision: dict | None = None,
                 content = json.dumps(web_digest)
             elif "simulated human working on" in system:
                 content = json.dumps(_pop_or_repeat(creation_script, DEFAULT_CREATION))
+            elif "writing your own life story" in system:
+                content = json.dumps({"biography": biography})
             else:
                 content = json.dumps(decision)
             self._respond(json.dumps(

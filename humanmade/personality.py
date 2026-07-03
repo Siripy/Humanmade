@@ -91,3 +91,44 @@ def agent_knobs(dims: dict) -> dict:
         # social level at which "you might speak up" appears in perception
         "speak_up_threshold": 18.0 + 26.0 * dims["extraversion"],
     }
+
+
+# ---------------------------------------------------------------------
+# Identity drift: real people are slowly changed by their lives. A day
+# spent lonely and low nudges neuroticism up a hair; a day full of real
+# conversation nudges extraversion up; pride/shame very slightly move
+# conscientiousness. The change is deliberately tiny and rate-limited per
+# day, and capped relative to where the person started — this is drift,
+# not a random walk that eventually turns someone into their opposite.
+
+DRIFT_RATE_PER_DAY = 0.003     # max |change| to any one dimension per day
+DRIFT_ORIGIN_CAP = 0.15        # max total drift from the day-one persona
+
+
+def drift(dims: dict, origin: dict, day_stats: dict) -> dict:
+    """One day's worth of bounded personality drift from how it actually
+    went. `day_stats`: valence_sum/valence_n (mean mood that day),
+    conversations (companion messages heard), pride/shame (appraisal
+    counts). Returns new dimensions; does not mutate the input."""
+    valence_n = day_stats.get("valence_n", 0)
+    mean_valence = (day_stats.get("valence_sum", 0.0) / valence_n) if valence_n else 0.0
+    conversations = day_stats.get("conversations", 0)
+    pride = day_stats.get("pride", 0)
+    shame = day_stats.get("shame", 0)
+
+    raw_deltas = {
+        "neuroticism": -mean_valence,
+        "extraversion": 1.0 if conversations >= 3 else -0.6,
+        "conscientiousness": (pride - shame) * 0.3,
+        "openness": 0.0,   # no clear daily signal for this one (yet)
+    }
+    new = dict(dims)
+    for dim, raw in raw_deltas.items():
+        if raw == 0:
+            continue
+        delta = max(-DRIFT_RATE_PER_DAY, min(DRIFT_RATE_PER_DAY,
+                                             raw * DRIFT_RATE_PER_DAY))
+        lo = max(0.05, origin.get(dim, dims[dim]) - DRIFT_ORIGIN_CAP)
+        hi = min(0.95, origin.get(dim, dims[dim]) + DRIFT_ORIGIN_CAP)
+        new[dim] = max(lo, min(hi, new[dim] + delta))
+    return new

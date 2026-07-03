@@ -182,6 +182,16 @@ class MemoryStream:
     def count(self) -> int:
         return self.db.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
 
+    def highlights(self, n: int = 25) -> list[Memory]:
+        """A life's greatest hits: the most important memories of all time
+        (not just recent ones), oldest first — the raw material for a
+        biography rather than a status update."""
+        rows = self.db.execute(
+            "SELECT id,kind,text,importance,sim_minutes,created_at,last_access "
+            "FROM memories ORDER BY importance DESC, id DESC LIMIT ?", (n,)
+        ).fetchall()
+        return sorted((Memory(*r) for r in rows), key=lambda m: m.sim_minutes)
+
     # ------------------------------------------------------------- embeddings
 
     def unembedded(self, limit: int = 16) -> list[tuple[int, str]]:

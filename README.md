@@ -53,6 +53,7 @@ server's `base_url` in `config.json`. `OLLAMA_HOST` is honored when
 | `/web [n]` | what it's read online recently (needs `internet.enabled`) |
 | `/read` | the piece it's currently working on, and how far along it is |
 | `/works` | the library of everything it's ever finished and sold |
+| `/biography` | its whole life story so far, in its own words |
 | `/speed <n>` | sim-minutes per real second (default 1) |
 | `/thoughts` | toggle the inner monologue |
 | `/newlife` | after a death, a new person is born (old memories archived) |
@@ -191,6 +192,23 @@ it end to end against a local mock website, no real network required.
   scrolls, clicks, and reads exactly as looking at a screen does, structurally
   read-only (GET requests only, no downloads, no popups, allowlisted navigation).
   See "Seeing the web" above.
+- **A person who changes** (`humanmade/personality.py`) — the day-200 human isn't
+  just carrying more memories than day 1; its actual temperament has moved. Once a
+  day, how the day genuinely went (mean mood, real conversation, pride, shame)
+  nudges its Big Five dimensions a hair — a lonely stretch raises neuroticism, rich
+  conversation raises extraversion, pride over shame raises conscientiousness — then
+  the concrete parameters (mood reactivity, social drain, plan adherence...) are
+  re-derived so the shift actually changes behavior, not just the number. It's
+  rate-limited per day and capped relative to who it was at birth, so this is
+  drift, not a random walk into someone else. A separate **self-esteem** score
+  (not a fixed trait — built by finished work and skill milestones, eroded by
+  accidents) gates how easily it opens up: low self-esteem masks pain even with
+  people it's fairly close to, high self-esteem opens up even to someone new.
+  Reflection can also update its **self-view** — a first-person sentence of who it
+  currently thinks it is, carried into every thought — and `/biography` asks the
+  LLM to stitch the highest-importance memories of its whole life (plus how its
+  own temperament has genuinely shifted since day one) into an honest first-person
+  life story.
 
 ## Research notes
 
@@ -255,6 +273,14 @@ The design borrows from actual human-behavior literature:
   region, with the rest of a scene perceived only vaguely until attention moves
   there — the model for the browsing gaze loop's viewport-only sight, one glance
   (scroll, click, or back) at a time rather than reading a whole page at once.
+- **Personality trait stability and change** (Bleidorn et al., 2021): traits are a
+  stable foundation that nonetheless keeps moving across a life in response to
+  real experience — the basis for identity drift being slow, bounded, and shaped
+  by how days actually go, rather than either fixed forever or freely random.
+- **Sociometer theory** (Leary, 1995): self-esteem functions as a gauge of
+  relational/competence value that responds asymmetrically — a knock lowers it
+  more than a win raises it — matching why shame here costs more self-esteem
+  than an equivalent pride restores.
 
 Sources: [Walker & van der Helm, "Overnight therapy?"](https://pubmed.ncbi.nlm.nih.gov/19702380/) ·
 [Berkeley News on REM and painful memories](https://news.berkeley.edu/2011/11/23/dream-sleep/) ·
@@ -262,7 +288,9 @@ Sources: [Walker & van der Helm, "Overnight therapy?"](https://pubmed.ncbi.nlm.n
 [Park et al., Generative Agents](https://dl.acm.org/doi/fullHtml/10.1145/3586183.3606763) ·
 [Montaruli et al., chronotype & health](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC8063933/) ·
 [Ainsworth's Strange Situation](https://www.simplypsychology.org/mary-ainsworth.html) ·
-[Rayner, eye movements & attention in reading/scene perception/visual search](https://pubmed.ncbi.nlm.nih.gov/19449261/)
+[Rayner, eye movements & attention in reading/scene perception/visual search](https://pubmed.ncbi.nlm.nih.gov/19449261/) ·
+[Bleidorn et al., Personality Trait Stability and Change](https://journals.sagepub.com/doi/10.5964/ps.6009) ·
+[Leary, Sociometer theory](https://www.tandfonline.com/doi/abs/10.1080/10463280540000007)
 
 ## State & persistence
 
@@ -327,8 +355,9 @@ thinking, LLM-failure fallback, reincarnation, the behavior layer (chronotype,
 emotional inertia, dreams, overnight consolidation, daily planning, the
 away/return reunion flow), the credit economy, semantic memory embeddings,
 conversation compression, first-run naming, real creative-work sessions
-(fragment writing, titling, completion and sale, cross-life archiving), and —
-when [Playwright](https://playwright.dev/) is installed — real browsing
-(viewport-only sight, link-following, scrolling, the read-only safety layer, and
-the full browse-action lifecycle) against the local mock website, with zero real
-network access.
+(fragment writing, titling, completion and sale, cross-life archiving), identity
+drift (bounded/rate-limited/origin-capped trait change, self-esteem, self-view,
+biography synthesis), and — when [Playwright](https://playwright.dev/) is
+installed — real browsing (viewport-only sight, link-following, scrolling, the
+read-only safety layer, and the full browse-action lifecycle) against the local
+mock website, with zero real network access.

@@ -26,7 +26,7 @@ from .body import Body
 from .brain import ACTIONS, BrainError, LLMBrain, ReflexBrain
 from .creation import HOBBIES, HOBBY_KIND, FRAGMENT_NOUN, Work, WorksLibrary, craft_descriptor
 from .memory import MemoryStream
-from .personality import agent_knobs, body_knobs, derive_disposition
+from .personality import agent_knobs, body_knobs, derive_disposition, describe, drift
 from .world import World
 
 FIRST_NAMES = ["June", "Theo", "Mara", "Elio", "Nadia", "Ravi", "Iris", "Sol",
@@ -71,11 +71,15 @@ def make_persona(name: str | None = None) -> dict:
     personality = ", ".join(random.sample(TRAITS, 3))
     loved, hated = random.sample(["sunny", "cloudy", "rainy", "stormy"], 2)
     hobby = random.choice(HOBBIES)
+    disposition = derive_disposition(personality)
     return {
         "name": name or random.choice(FIRST_NAMES),
         "age": random.randint(19, 74),
         "personality": personality,
-        "disposition": derive_disposition(personality),
+        "disposition": disposition,
+        "origin_dimensions": dict(disposition["dimensions"]),  # who they started as
+        "self_esteem": 0.5,
+        "self_view": None,
         "chronotype": chronotype,
         "loves_weather": loved,
         "hates_weather": hated,
@@ -190,6 +194,14 @@ class Human:
         self.works = WorksLibrary(state_dir)
         self._creating = False
 
+        # identity drift: today's raw material, folded into personality
+        # once a day and then reset (see personality.drift)
+        self._day_stats = {"valence_sum": 0.0, "valence_n": 0,
+                           "conversations": 0, "pride": 0, "shame": 0}
+        self._biography: str | None = self.memory.get_meta("biography")
+        self._biography_stale = self.memory.get_meta("biography_stale", "1") == "1"
+        self._writing_biography = False
+
     def _apply_disposition(self) -> None:
         """Wire the persona's temperament into body and behavior parameters."""
         if "disposition" not in self.persona:  # backfill pre-personality saves
@@ -205,6 +217,17 @@ class Human:
             self.persona["hobby"] = self.persona["backstory"].split(
                 "spends time ")[-1].split(".")[0]
         self.persona.setdefault("current_work_slug", None)
+        self.persona.setdefault(  # backfill pre-drift saves: "born" who they are now
+            "origin_dimensions", dict(self.persona["disposition"]["dimensions"]))
+        self.persona.setdefault("self_esteem", 0.5)
+        self.persona.setdefault("self_view", None)
+        self._reapply_knobs()
+
+    def _reapply_knobs(self) -> None:
+        """Push the persona's current dimensions into body/agent parameters.
+        Called at load and again after each day's identity drift, so a
+        changed temperament actually changes how the human behaves, not
+        just how it's described."""
         dims = self.persona["disposition"]["dimensions"]
         for knob, value in body_knobs(dims).items():
             setattr(self.body, knob, value)
@@ -244,6 +267,10 @@ class Human:
             self.memory.set_meta("routine", json.dumps(self.routine))
             if self.last_dream:
                 self.memory.set_meta("last_dream", self.last_dream)
+            if self._biography:
+                self.memory.set_meta("biography", self._biography)
+                self.memory.set_meta("biography_stale",
+                                     "1" if self._biography_stale else "0")
 
     # ------------------------------------------------------- companion inputs
 
@@ -279,6 +306,7 @@ class Human:
             self.inbox.append(text)
             self.body.social = min(100.0, self.body.social + 18)
             self._bond_adjust(closeness=0.4)
+            self._day_stats["conversations"] += 1
             self.memory.add("conversation", f"Companion said: \"{text}\"",
                             self.body.sim_minutes)
             self.minutes_since_decision = 10 ** 6  # answer promptly
@@ -347,6 +375,24 @@ class Human:
         with self.lock:
             return self.works.finished_works()
 
+    def biography_text(self) -> str | None:
+        with self.lock:
+            return self._biography
+
+    def request_biography(self) -> str:
+        """Kick off (or reuse) the life story on a worker thread — writing
+        one is an LLM call, so it can't happen synchronously inside a CLI
+        command. Returns 'ready' (biography_text() has it), 'writing'
+        (ask again shortly), or 'offline' (needs the LLM)."""
+        with self.lock:
+            if not self.llm_online:
+                return "offline"
+            if self._biography and not self._biography_stale:
+                return "ready"
+            if not self._writing_biography:
+                self._begin_biography()
+            return "writing"
+
     def status_report(self) -> list[str]:
         with self.lock:
             hobby = self.persona["hobby"]
@@ -359,7 +405,10 @@ class Human:
                 f"  {hobby}{title}: "
                 f"{float(self.persona.get('hobby_progress', 0)):.0f}% done",
                 "  skills: " + " · ".join(
-                    f"{name} {float(level):.0f}" for name, level in skills.items())]
+                    f"{name} {float(level):.0f}" for name, level in skills.items()),
+                f"  self-esteem: {float(self.persona.get('self_esteem', 0.5)) * 100:.0f}"
+                f"/100" + (f" — {self.persona['self_view']}"
+                          if self.persona.get("self_view") else "")]
 
     def recent_memories(self, n: int = 15):
         with self.lock:
@@ -398,6 +447,9 @@ class Human:
             if not self.body.alive:
                 self._die()
                 return
+
+            self._day_stats["valence_sum"] += self.body.valence_smoothed * sim_minutes
+            self._day_stats["valence_n"] += sim_minutes
 
             self._decay_emotion(sim_minutes)
 
@@ -470,6 +522,19 @@ class Human:
         if intensity >= self.emotion_intensity:
             self.emotion, self.emotion_intensity = label, min(1.0, intensity)
         self.body.nudge_mood(EMOTION_VALENCE.get(label, 0.0) * intensity)
+        # pride and shame are what self-esteem is actually built and
+        # eroded from — reusing every existing appraisal call site
+        # (finishing work, skill milestones, accidents...) for free
+        if label == "pride":
+            self._day_stats["pride"] += 1
+            self._adjust_self_esteem(0.015 * intensity)
+        elif label == "shame":
+            self._day_stats["shame"] += 1
+            self._adjust_self_esteem(-0.02 * intensity)
+
+    def _adjust_self_esteem(self, delta: float) -> None:
+        current = float(self.persona.get("self_esteem", 0.5))
+        self.persona["self_esteem"] = max(0.05, min(0.95, current + delta))
 
     def _decay_emotion(self, sim_minutes: float) -> None:
         if self.emotion_intensity > 0:
@@ -702,6 +767,23 @@ class Human:
             if summary:
                 self.on_event(f"({summary})")
 
+        self._apply_daily_drift()
+
+    def _apply_daily_drift(self) -> None:
+        """A day's worth of how it actually felt, folded into a tiny,
+        bounded personality shift — then re-derived into the concrete
+        parameters that make it behave differently (personality.drift)."""
+        dims = self.persona["disposition"]["dimensions"]
+        origin = self.persona.get("origin_dimensions", dims)
+        new_dims = drift(dims, origin, self._day_stats)
+        if new_dims != dims:
+            self.persona["disposition"]["dimensions"] = new_dims
+            self.persona["disposition"]["description"] = describe(new_dims)
+            self._reapply_knobs()
+        self._day_stats = {"valence_sum": 0.0, "valence_n": 0,
+                           "conversations": 0, "pride": 0, "shame": 0}
+        self._biography_stale = True
+
     # --------------------------------------------------------- sleep & dreams
 
     def _handle_sleep_transitions(self) -> None:
@@ -906,6 +988,8 @@ class Human:
             f"hygiene:{b.hygiene:.0f} fun:{b.fun:.0f} social:{b.social:.0f} "
             f"health:{b.health:.0f} (all 0-100)",
         ]
+        if self.persona.get("self_view"):
+            lines.append(f"Who you are, as you see it: {self.persona['self_view']}")
         if self.emotion and self.emotion_intensity > 0.15:
             lines.append(f"A feeling of {self.emotion} sits with you "
                          f"({self.emotion_intensity:.1f}/1).")
@@ -970,7 +1054,11 @@ class Human:
         if known:
             lines.append("What you know about them: "
                          + "; ".join(m.text for m in known))
-        if self.bond["closeness"] < 35 and b.mood()[0] < -0.3:
+        # low self-esteem masks even with people you're fairly close to;
+        # high self-esteem opens up even to people you've barely met
+        esteem = float(self.persona.get("self_esteem", 0.5))
+        masking_threshold = 35 + (0.5 - esteem) * 40
+        if self.bond["closeness"] < masking_threshold and b.mood()[0] < -0.3:
             lines.append("You feel low, but you don't know them well enough to "
                          "unload. If they ask how you are, you'd probably just "
                          "say you're fine.")
@@ -1330,22 +1418,63 @@ class Human:
         self._reflecting = True
 
         def worker() -> None:
-            insights: list[str] = []
+            result = {"insights": [], "self_view": None}
             try:
-                insights = self.llm.reflect(self.persona, text)
+                result = self.llm.reflect(self.persona, text)
             except Exception:
                 pass
             with self.lock:
                 self._reflecting = False
                 if life_id != self._life_id or not self.body.alive:
                     return
-                for insight in insights:
+                for insight in result.get("insights", []):
                     self.memory.add("reflection", insight, self.body.sim_minutes,
                                     importance=8)
                     self.on_event(f"({self.persona['name']} realizes: {insight})")
+                self_view = result.get("self_view")
+                if self_view and self_view != self.persona.get("self_view"):
+                    self.persona["self_view"] = self_view
+                    self._biography_stale = True
+                    self.on_event(f"({self.persona['name']}'s sense of themself "
+                                  f"shifts: {self_view})")
 
         threading.Thread(target=worker, daemon=True,
                          name="humanmade-reflect").start()
+
+    def _begin_biography(self) -> None:
+        """The whole life so far, stitched into a first-person account from
+        its highest-importance memories — not a status update, an actual
+        story, including how its own temperament has genuinely changed."""
+        self._writing_biography = True
+        dims = self.persona["disposition"]["dimensions"]
+        origin = self.persona.get("origin_dimensions", dims)
+        origin_desc = describe(origin)
+        current_desc = describe(dims)
+        days_lived = self.body.day
+        finished_titles = [w.display_title for w in self.works.finished_works()]
+        highlights = self.memory.highlights(25)
+        text = "\n".join(f"- (day {int(m.sim_minutes // 1440)}) {m.text}"
+                        for m in highlights)
+        persona_snapshot = dict(self.persona)
+        life_id = self._life_id
+
+        def worker() -> None:
+            bio = None
+            try:
+                bio = self.llm.biography(persona_snapshot, origin_desc, current_desc,
+                                         days_lived, finished_titles, text)
+            except Exception:
+                pass
+            with self.lock:
+                self._writing_biography = False
+                if life_id != self._life_id:
+                    return
+                if bio:
+                    self._biography = bio
+                    self._biography_stale = False
+
+        threading.Thread(target=worker, daemon=True,
+                         name="humanmade-biography").start()
 
     # ------------------------------------------------------------------ death
 
@@ -1380,6 +1509,11 @@ class Human:
                 os.rename(works_dir, os.path.join(self.state_dir, f"works-{stamp}"))
             self.works = WorksLibrary(self.state_dir)
             self._creating = False
+            self._day_stats = {"valence_sum": 0.0, "valence_n": 0,
+                               "conversations": 0, "pride": 0, "shame": 0}
+            self._biography = None
+            self._biography_stale = True
+            self._writing_biography = False
             self.body, self.world = Body(), World()
             self.persona = make_persona()
             offset, _ = CHRONOTYPES.get(self.persona["chronotype"], (0.0, ""))

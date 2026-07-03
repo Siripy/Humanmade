@@ -14,8 +14,8 @@ Commands:
   /journal [n]   read its diary          /medicine     order medicine when sick
   /bond          how it feels about you  /habits       its learned routine
   /web [n]       what it's read online   /read         its work in progress
-  /works         its finished creations  /newlife      start a new person
-  /quit          save and exit
+  /works         its finished creations  /biography    its whole life story
+  /newlife       start a new person     /quit          save and exit
 """
 
 import json
@@ -247,6 +247,15 @@ def main() -> None:
                         known = human.memory.recent(8, kinds=("companion",))
                         for m in known:
                             print(f"  knows: {m.text}")
+            elif line == "/biography":
+                status = human.request_biography()
+                with print_lock:
+                    if status == "offline":
+                        print(f"{name}'s mind needs to be online to write this.")
+                    elif status == "writing":
+                        print(f"{name} is thinking it over — ask again in a moment.")
+                    else:
+                        print(human.biography_text())
             elif line == "/habits":
                 with print_lock:
                     with human.lock:

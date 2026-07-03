@@ -103,11 +103,21 @@ class TestLLMBrain(unittest.TestCase):
             srv.stop()
 
     def test_reflect_against_mock_ollama(self):
-        srv, base_url = start_mock_ollama(insights=["I am not alone."])
+        srv, base_url = start_mock_ollama(insights=["I am not alone."],
+                                          self_view="I am steadier than I was.")
         try:
             brain = LLMBrain({"base_url": base_url, "model": "test"})
-            self.assertEqual(brain.reflect(PERSONA, "- memory one"),
-                             ["I am not alone."])
+            result = brain.reflect(PERSONA, "- memory one")
+            self.assertEqual(result["insights"], ["I am not alone."])
+            self.assertEqual(result["self_view"], "I am steadier than I was.")
+        finally:
+            srv.stop()
+
+    def test_reflect_self_view_defaults_to_none(self):
+        srv, base_url = start_mock_ollama(insights=["ok"])
+        try:
+            brain = LLMBrain({"base_url": base_url, "model": "test"})
+            self.assertIsNone(brain.reflect(PERSONA, "- memory one")["self_view"])
         finally:
             srv.stop()
 

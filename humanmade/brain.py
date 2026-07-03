@@ -165,17 +165,48 @@ class LLMBrain:
         raw = self.chat(system, messages)
         return _parse_decision(raw, actions)
 
-    def reflect(self, persona: dict, memories_text: str) -> list[str]:
+    def reflect(self, persona: dict, memories_text: str) -> dict:
         system = (f"You are the reflective mind of {persona['name']}, a simulated human. "
                   "Given recent memories, distill 1-3 higher-level insights about your "
-                  "life, needs, feelings, or your companion. First person. Respond ONLY "
-                  'with JSON: {"insights": ["...", "..."]}')
+                  "life, needs, feelings, or your companion. First person. Also: if your "
+                  "sense of who you are has genuinely shifted lately, give an updated "
+                  "one-sentence self-view (first person) — otherwise leave it null; most "
+                  "of the time nothing has changed enough to say. Respond ONLY with "
+                  'JSON: {"insights": ["...", "..."], '
+                  '"self_view": "<one sentence, or null>"}')
         raw = self.chat(system, [{"role": "user", "content": memories_text}])
         try:
             data = json.loads(_extract_json(raw))
-            return [str(i) for i in data.get("insights", [])][:3]
+            insights = [str(i) for i in data.get("insights", [])][:3]
         except (json.JSONDecodeError, AttributeError):
-            return []
+            return {"insights": [], "self_view": None}
+        self_view = data.get("self_view")
+        self_view = self_view if isinstance(self_view, str) and self_view.strip() else None
+        return {"insights": insights, "self_view": self_view}
+
+    def biography(self, persona: dict, origin_description: str,
+                 current_description: str, days_lived: int,
+                 finished_titles: list[str], memories_text: str) -> str | None:
+        """The whole life so far, in its own words — not a status update,
+        an actual first-person account of what happened and how it changed
+        the person telling it."""
+        works_note = (f" Things you've finished and sold: {', '.join(finished_titles)}."
+                      if finished_titles else "")
+        system = (f"You are {persona['name']}, a simulated human writing your own "
+                  f"life story, {days_lived} days in. When you began: "
+                  f"{origin_description}. Who you are now: {current_description}."
+                  f"{works_note}\n"
+                  "Given the memories below — the highlights of your life so far, in "
+                  "order — write your own biography in first person: 3-6 honest "
+                  "paragraphs about what happened, how you changed, and what actually "
+                  'mattered. Respond ONLY with JSON: {"biography": "..."}')
+        raw = self.chat(system, [{"role": "user", "content": memories_text}])
+        try:
+            data = json.loads(_extract_json(raw))
+            bio = data.get("biography")
+            return bio if isinstance(bio, str) and bio.strip() else None
+        except (json.JSONDecodeError, AttributeError):
+            return None
 
     def plan_day(self, persona: dict, context: str) -> list[str]:
         """Sketch the day into a handful of intentions (Park et al. planning)."""
