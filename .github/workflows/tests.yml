@@ -15,4 +15,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      # optional web-senses dependency: install it in CI so the browser
+      # tests actually run (they self-skip cleanly where it's absent)
+      - run: pip install playwright && playwright install --with-deps chromium
       - run: python -m unittest -v

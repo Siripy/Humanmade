@@ -14,6 +14,33 @@ from tests.mockweb import start_mock_website
 
 VIEWPORT = (800, 400)
 
+_browser_probe: bool | None = None
+
+
+def real_browser_available() -> bool:
+    """True when Playwright AND a launchable Chromium are actually present.
+    Import alone isn't enough — `pip install playwright` without
+    `playwright install chromium` has the module but no binary."""
+    global _browser_probe
+    if _browser_probe is None:
+        if not internet.PLAYWRIGHT_AVAILABLE:
+            _browser_probe = False
+        else:
+            try:
+                with WebSenses(allowlist=["127.0.0.1"], viewport=VIEWPORT,
+                              nav_timeout_ms=8000):
+                    pass
+                _browser_probe = True
+            except Exception:
+                _browser_probe = False
+    return _browser_probe
+
+
+needs_browser = unittest.skipUnless(
+    real_browser_available(),
+    "needs Playwright + Chromium (pip install playwright && "
+    "playwright install chromium)")
+
 
 class TestDomainAllowlist(unittest.TestCase):
     def test_exact_host_allowed(self):
@@ -64,6 +91,7 @@ class TestBrowserUnavailable(unittest.TestCase):
             internet.PLAYWRIGHT_AVAILABLE = original
 
 
+@needs_browser
 class TestWebSensesAgainstMockSite(unittest.TestCase):
     """Real Playwright, real rendering, real navigation — just pointed at a
     local server instead of the internet."""
@@ -172,6 +200,7 @@ class TestWebSensesAgainstMockSite(unittest.TestCase):
             srv.stop()
 
 
+@needs_browser
 class TestRunBrowseSession(unittest.TestCase):
     """The full gaze loop against the mock site, driven by a fake brain
     (no LLM needed to test the orchestration logic itself)."""

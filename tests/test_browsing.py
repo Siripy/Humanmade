@@ -14,6 +14,7 @@ from humanmade.agent import Human
 from tests.mockllm import start_mock_ollama
 from tests.mockweb import start_mock_website
 from tests.test_agent import THINK_TIMEOUT, drive_one_thought, make_human
+from tests.test_internet import needs_browser
 
 FAKE_SESSION_RESULT = {"summary": None, "share": None, "emotion": None,
                        "fact_learned": None, "sites_visited": []}
@@ -266,6 +267,7 @@ class TestHabitAndNewLife(unittest.TestCase):
             human.memory.close()
 
 
+@needs_browser
 class TestFullBrowsingSession(unittest.TestCase):
     """The whole pipeline for real: a mock LLM chooses to browse, a real
     Playwright session runs against a real local website, and the result
