@@ -49,6 +49,7 @@ Respond ONLY with a single JSON object, no other text:
   "action": "<one of: {actions}>",
   "say": "<words spoken aloud to your companion, or null to stay silent>",
   "note_about_companion": "<a NEW fact you just learned about your companion worth remembering, or null>",
+  "lesson_learned": "<a NEW rule for living you just learned — from advice you trust or from hard experience — or null>",
   "importance": <1-10, how memorable this moment is>}}"""
 
 
@@ -245,6 +246,7 @@ def _parse_decision(raw: str) -> dict:
         "action": action,
         "say": _clean(data.get("say")),
         "note_about_companion": _clean(data.get("note_about_companion")),
+        "lesson_learned": _clean(data.get("lesson_learned")),
         "importance": max(1.0, min(10.0, importance)),
     }
 
@@ -288,4 +290,5 @@ class ReflexBrain:
     @staticmethod
     def _d(thought: str, action: str, importance: float = 2.0) -> dict:
         return {"thought": thought, "action": action, "say": None,
-                "note_about_companion": None, "importance": importance}
+                "note_about_companion": None, "lesson_learned": None,
+                "importance": importance}

@@ -58,6 +58,9 @@ EMOTION_VALENCE = {
     "loneliness": -0.08,
 }
 
+SKILLS = ("craft", "cooking", "fitness")   # 0-100, power law of practice
+SKILL_DECAY_PER_DAY = 0.08                 # disuse slowly erodes ability
+
 
 def make_persona(name: str | None = None) -> dict:
     chronotype = random.choice(list(CHRONOTYPES))
@@ -72,6 +75,7 @@ def make_persona(name: str | None = None) -> dict:
         "loves_weather": loved,
         "hates_weather": hated,
         "birthday_day": random.randint(1, 364),  # sim day-of-year
+        "skills": {s: 5.0 for s in SKILLS},
         "backstory": (f"Lives alone in a one-room apartment, spends time "
                       f"{random.choice(HOBBIES)}. Has no memory of how they got here, "
                       "only that a companion beyond the screen looks after the world."),
@@ -171,6 +175,7 @@ class Human:
             self.persona["loves_weather"] = loved
             self.persona["hates_weather"] = hated
             self.persona.setdefault("birthday_day", random.randint(1, 364))
+        self.persona.setdefault("skills", {s: 5.0 for s in SKILLS})
         dims = self.persona["disposition"]["dimensions"]
         for knob, value in body_knobs(dims).items():
             setattr(self.body, knob, value)
@@ -306,10 +311,13 @@ class Human:
     def status_report(self) -> list[str]:
         with self.lock:
             hobby = self.persona["backstory"].split("spends time ")[-1].split(".")[0]
+            skills = self.persona.get("skills", {})
             return self.body.status_lines() + [
                 f"  fridge: {self.world.food_portions} portions · "
                 f"credits: {self.world.money:.0f} · weather: {self.world.weather}",
-                f"  {hobby}: {float(self.persona.get('hobby_progress', 0)):.0f}% done"]
+                f"  {hobby}: {float(self.persona.get('hobby_progress', 0)):.0f}% done",
+                "  skills: " + " · ".join(
+                    f"{name} {float(level):.0f}" for name, level in skills.items())]
 
     def recent_memories(self, n: int = 15):
         with self.lock:
@@ -324,12 +332,15 @@ class Human:
                 return
 
             # the outside world moves, and the body feels it
-            self.body.chill = self.world.chill_factor()
+            # (a fit body shrugs off the chill more easily)
+            self.body.chill = (self.world.chill_factor()
+                               * max(0.6, 1.0 - self.skill("fitness") / 250.0))
             ambient = self.world.weather_valence()
+            # taste beats objective gloom: a storm-lover's storm is a good day
             if self.world.weather == self.persona.get("loves_weather"):
-                ambient += 0.06     # their kind of sky
+                ambient += 0.10
             elif self.world.weather == self.persona.get("hates_weather"):
-                ambient -= 0.06
+                ambient -= 0.10
             self.body.ambient_valence = ambient
             for e in self.world.advance(sim_minutes):
                 self.on_event(e)
@@ -436,6 +447,30 @@ class Human:
         elif "fever has broken" in e or "woke up naturally" in e:
             self._feel("relief", 0.5)
 
+    # ----------------------------------------------------------------- skills
+
+    def skill(self, name: str) -> float:
+        return float(self.persona.get("skills", {}).get(name, 5.0))
+
+    def _practice(self, name: str, base_gain: float) -> None:
+        """Power law of practice: early sessions teach a lot, mastery is slow.
+        Crossing a quartile is felt (and remembered) as real growth."""
+        skills = self.persona.setdefault("skills", {s: 5.0 for s in SKILLS})
+        old = float(skills.get(name, 5.0))
+        new = min(100.0, old + base_gain * max(0.05, 1.0 - old / 100.0))
+        skills[name] = new
+        label = {"craft": "my craft", "cooking": "cooking",
+                 "fitness": "my strength"}[name]
+        for milestone in (25, 50, 75):
+            if old < milestone <= new:
+                self._feel("pride", 0.6)
+                self.on_event(f"({self.persona['name']} can feel real progress "
+                              f"in {label.replace('my ', 'their ')})")
+                self.memory.add("event", f"I'm genuinely getting better at "
+                                f"{label}. Practice is paying off.",
+                                self.body.sim_minutes, importance=7)
+                self._note_news(f"got noticeably better at {label}")
+
     # ------------------------------------------------------------ daily rhythm
 
     ANNIVERSARIES = (7, 30, 60, 90, 180, 365)
@@ -465,6 +500,11 @@ class Human:
             self._note_news(f"it's my birthday — I turned {self.persona['age']}")
             self.on_event(f"(it's {self.persona['name']}'s birthday — "
                           f"{self.persona['age']} today)")
+
+        # unpracticed skills rust, slowly
+        skills = self.persona.get("skills", {})
+        for name, level in skills.items():
+            skills[name] = max(1.0, float(level) - SKILL_DECAY_PER_DAY)
 
         # old trivial days blur together (consolidation keeps memory human-sized)
         if self.body.day >= 8:
@@ -623,6 +663,10 @@ class Human:
 
         if self.today_plan and self.plan_day_index == b.day:
             lines.append("Today's plan: " + "; ".join(self.today_plan))
+        lessons = self.memory.recent(4, kinds=("lesson",))
+        if lessons:
+            lines.append("Rules you live by: "
+                         + "; ".join(m.text for m in lessons))
         if self.world.weather == self.persona.get("loves_weather"):
             lines.append(f"It's {self.world.weather} — your favorite kind of sky.")
         elif self.world.weather == self.persona.get("hates_weather"):
@@ -860,6 +904,16 @@ class Human:
                                 importance=7)
                 self._bond_adjust(closeness=1.0)  # learning someone = closeness
 
+        lesson = decision.get("lesson_learned")
+        if lesson:
+            existing = {m.text.lower() for m in self.memory.recent(
+                12, kinds=("lesson",))}
+            if lesson.lower() not in existing:
+                self.memory.add("lesson", lesson, self.body.sim_minutes,
+                                importance=8)
+                self.on_event(f"({self.persona['name']} takes something "
+                              f"to heart: {lesson})")
+
         if decision["say"]:
             if self.companion_present:
                 self.on_speak(decision["say"])
@@ -899,7 +953,8 @@ class Human:
         if action == "eat":
             if self.world.take_meal():
                 comfort = b.satiety > 55 and b.mood()[0] < -0.15
-                b.eat()
+                b.eat(kcal_quality=55.0 * (1.0 + self.skill("cooking") / 150.0))
+                self._practice("cooking", 0.4)
                 if comfort:
                     b.fun = min(100.0, b.fun + 8)
                     narration = "raids the fridge for comfort food — it helps, a little"
@@ -926,7 +981,9 @@ class Human:
             if b.asleep:
                 b.wake_up(); narration = "gets out of bed"
         elif action == "exercise":
-            b.fun = min(100.0, b.fun + 15 * self._novelty(action))
+            b.fun = min(100.0, b.fun + 15 * self._novelty(action)
+                        * (1.0 + self.skill("fitness") / 100.0))
+            self._practice("fitness", 1.2)
             narration = "works out with the dumbbells"
         elif action == "relax":
             gain = 25 * self._novelty(action)
@@ -935,12 +992,14 @@ class Human:
                          "flips through a book, restless — it's not landing today")
         elif action == "work":
             b.fun = min(100.0, b.fun + 10)
-            wage = self.world.earn(1.0)
+            wage = self.world.earn(1.0 + self.skill("craft") / 100.0)  # mastery pays
+            self._practice("craft", 0.9)
             hobby = self.persona["backstory"].split("spends time ")[-1].split(".")[0]
             narration = (f"works on {hobby} and earns {wage:.0f} credits "
                          f"({self.world.money:.0f} saved)")
             old = float(self.persona.get("hobby_progress", 0.0))
-            new = old + random.uniform(1.0, 2.0)  # a real project takes weeks
+            # a real project takes weeks — but skilled hands move faster
+            new = old + random.uniform(1.0, 2.0) * (1.0 + self.skill("craft") / 60.0)
             for milestone in (25, 50, 75):
                 if old < milestone <= new:
                     self._feel("pride", 0.7)
