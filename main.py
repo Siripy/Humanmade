@@ -11,6 +11,7 @@ Commands:
   /restock       buy groceries          /thoughts      toggle inner monologue
   /away          tell it you're leaving (it waits; type anything to return)
   /plan          see today's plan        /dream        recall last night's dream
+  /journal [n]   read its diary          /medicine     order medicine when sick
   /newlife       start a new person     /quit          save and exit
 """
 
@@ -162,6 +163,29 @@ def main() -> None:
                         print(f"{name}'s last dream: {human.last_dream}")
                     else:
                         print(f"{name} doesn't remember dreaming yet.")
+            elif line.startswith("/journal"):
+                parts = line.split()
+                n = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 5
+                entries = human.journal_entries(n)
+                with print_lock:
+                    if entries:
+                        for m in entries:
+                            d = int(m.sim_minutes // 1440)
+                            print(f"  [day {d}] {m.text}")
+                    else:
+                        print(f"{name}'s diary is still blank "
+                              "(entries are written at bedtime, LLM brain online).")
+            elif line == "/medicine":
+                r = human.medicine()
+                if r["ok"]:
+                    out(f"{C_EVENT}· medicine delivered — fever easing "
+                        f"(sickness {r['sickness']:.0f}/100, "
+                        f"{r['money']:.0f} credits left){C_RESET}")
+                elif r["reason"] == "not sick":
+                    print(f"{name} isn't sick right now.")
+                else:
+                    out(f"{C_EVENT}· the pharmacy declined — {name} can't afford "
+                        f"medicine ({r['money']:.0f} credits){C_RESET}")
             elif line == "/newlife":
                 if human.body.alive:
                     print(f"{name} is still alive. This only works after death.")

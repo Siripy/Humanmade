@@ -101,6 +101,7 @@ class Human:
         self._sleep_started_sim = self.body.sim_minutes
         self._dreamed_this_sleep = False
         self._planning = False
+        self._last_journal_sim = -10 ** 9
 
         # companion presence & attachment (Bowlby/Ainsworth)
         self.companion_present = True
@@ -206,11 +207,35 @@ class Human:
             return {"bought": bought, "total": self.world.food_portions,
                     "money": self.world.money}
 
+    def medicine(self) -> dict:
+        """Order medicine for the human (its credits). Returns what happened."""
+        with self.lock:
+            if self.body.sickness <= 0:
+                return {"ok": False, "reason": "not sick",
+                        "money": self.world.money}
+            if not self.world.buy_medicine():
+                self.memory.add("event", "My companion tried to order medicine "
+                                "but I can't afford it.", self.body.sim_minutes,
+                                importance=7)
+                return {"ok": False, "reason": "broke", "money": self.world.money}
+            self.body.take_medicine()
+            self.memory.add("event", "My companion ordered medicine for me. "
+                            "I already feel it working.", self.body.sim_minutes,
+                            importance=7)
+            return {"ok": True, "sickness": self.body.sickness,
+                    "money": self.world.money}
+
+    def journal_entries(self, n: int = 5):
+        with self.lock:
+            return self.memory.recent(n, kinds=("journal",))
+
     def status_report(self) -> list[str]:
         with self.lock:
+            hobby = self.persona["backstory"].split("spends time ")[-1].split(".")[0]
             return self.body.status_lines() + [
                 f"  fridge: {self.world.food_portions} portions · "
-                f"credits: {self.world.money:.0f}"]
+                f"credits: {self.world.money:.0f} · weather: {self.world.weather}",
+                f"  {hobby}: {float(self.persona.get('hobby_progress', 0)):.0f}% done"]
 
     def recent_memories(self, n: int = 15):
         with self.lock:
@@ -224,6 +249,13 @@ class Human:
             if not self.body.alive:
                 return
 
+            # the outside world moves, and the body feels it
+            self.body.chill = self.world.chill_factor()
+            self.body.ambient_valence = self.world.weather_valence()
+            for e in self.world.advance(sim_minutes):
+                self.on_event(e)
+                self.memory.add("observation", e, self.body.sim_minutes,
+                                importance=3)
             events = self.body.tick(sim_minutes, self.current_action)
             for e in events:
                 self.on_event(e)
@@ -301,6 +333,9 @@ class Human:
         if is_now and not was:                    # just fell asleep
             self._sleep_started_sim = now
             self._dreamed_this_sleep = False
+            if now - self._last_journal_sim >= 12 * 60:
+                self._last_journal_sim = now
+                self._begin_journal()
         elif is_now and not self._dreamed_this_sleep and self.llm_online:
             if now - self._sleep_started_sim >= 60:  # into deeper sleep -> a dream
                 self._dreamed_this_sleep = True
@@ -314,6 +349,30 @@ class Human:
                                   "sharpest edges of yesterday have dulled overnight)")
                 self._begin_planning()
         self._was_asleep = is_now
+
+    def _begin_journal(self) -> None:
+        """Before sleep, put the day into words (expressive writing)."""
+        if not self.llm_online:
+            return
+        recent = self.memory.recent(25)
+        text = "\n".join(f"- {m.text}" for m in recent)
+        life_id = self._life_id
+
+        def worker() -> None:
+            try:
+                entry = self.llm.journal(self.persona, text)
+            except Exception:
+                entry = None
+            if not entry:
+                return
+            with self.lock:
+                if life_id != self._life_id:
+                    return
+                self.memory.add("journal", entry, self.body.sim_minutes,
+                                importance=6)
+
+        threading.Thread(target=worker, daemon=True,
+                         name="humanmade-journal").start()
 
     def _begin_dream(self) -> None:
         material = self.memory.emotional_material(self._sleep_started_sim - 900)
@@ -398,6 +457,10 @@ class Human:
         urgent = b.urgent_needs()
         if urgent:
             lines.append("URGENT: " + "; ".join(urgent))
+        if b.sickness > 0:
+            lines.append(f"You are ill (severity {b.sickness:.0f}/100). Rest and "
+                         "sleep help; medicine (12 credits) works fast, but only "
+                         "your companion can order it — ask them.")
         lines.append(self.world.describe())
 
         if self.today_plan and self.plan_day_index == b.day:
@@ -547,7 +610,7 @@ class Human:
             needed.append("toilet")
         if b.satiety < 12 and self.world.food_portions > 0:
             needed.append("eat")
-        if b.energy < 8 and not b.asleep:
+        if (b.energy < 8 or b.sickness > 85) and not b.asleep:
             needed.append("sleep")
         if not needed or decision["action"] in needed:
             return decision
@@ -630,8 +693,28 @@ class Human:
         elif action == "work":
             b.fun = min(100.0, b.fun + 10)
             wage = self.world.earn(1.0)
-            narration = (f"works on {self.persona['backstory'].split('spends time ')[-1].split('.')[0]}"
-                         f" and earns {wage:.0f} credits ({self.world.money:.0f} saved)")
+            hobby = self.persona["backstory"].split("spends time ")[-1].split(".")[0]
+            narration = (f"works on {hobby} and earns {wage:.0f} credits "
+                         f"({self.world.money:.0f} saved)")
+            old = float(self.persona.get("hobby_progress", 0.0))
+            new = old + random.uniform(1.0, 2.0)  # a real project takes weeks
+            for milestone in (25, 50, 75):
+                if old < milestone <= new:
+                    self.on_event(f"({hobby} just passed {milestone}% — "
+                                  "it's really taking shape)")
+                    self.memory.add("event", f"My {hobby} passed {milestone}%. "
+                                    "It's really taking shape.", b.sim_minutes,
+                                    importance=7)
+                    self._note_news(f"made real progress on {hobby} ({milestone}%)")
+            if new >= 100:
+                new = 0.0
+                self.on_event(f"({self.persona['name']} FINISHED {hobby}! "
+                              "Already dreaming up the next one.)")
+                self.memory.add("event", f"I FINISHED {hobby} today. I actually "
+                                "finished it. Starting the next one soon.",
+                                b.sim_minutes, importance=9)
+                self._note_news(f"finished {hobby}!")
+            self.persona["hobby_progress"] = new
 
         self.current_action = action
         self.action_minutes_left = ACTION_DURATION.get(action, 20)
@@ -713,6 +796,7 @@ class Human:
             self._sleep_started_sim = self.body.sim_minutes
             self._dreamed_this_sleep = False
             self._planning = False
+            self._last_journal_sim = -10 ** 9
             self.companion_present = True
             self.last_seen_sim = self.body.sim_minutes
             self.pending_news.clear()

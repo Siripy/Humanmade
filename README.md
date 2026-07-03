@@ -47,6 +47,8 @@ server's `base_url` in `config.json`. `OLLAMA_HOST` is honored when
 | `/away` | tell it you're leaving — it says goodbye, then waits |
 | `/plan` | see the plan it sketched for today |
 | `/dream` | recall what it dreamt last night |
+| `/journal [n]` | read its private diary (written at bedtime) |
+| `/medicine` | order medicine when it's sick — paid from its credits |
 | `/speed <n>` | sim-minutes per real second (default 1) |
 | `/thoughts` | toggle the inner monologue |
 | `/newlife` | after a death, a new person is born (old memories archived) |
@@ -111,6 +113,13 @@ a low `/speed` and it'll have a day's worth of life — and a dream — to recou
   money. The human earns credits with its `work` action; only *you* can place the
   grocery order, and it spends *the human's* credits — so "I'm broke", "the fridge
   is empty", and "could you order food?" are all real conversations it has to start.
+  **Weather** drifts between sun, cloud, rain, and storm — nudging mood and raising
+  the odds of **catching an illness** when it's foul (worse with poor hygiene or
+  exhaustion). Sickness means fever in the vitals, faster fatigue, and danger if
+  ignored; rest and sleep heal it slowly, `/medicine` (its credits) works fast.
+  Meanwhile its hobby genuinely progresses: `work` advances the novel/sketches/music
+  through milestones it's proud to tell you about, and each night before sleep it
+  writes a **private diary entry** you can read with `/journal`.
 - **Attachment** (`humanmade/agent.py`) — the human tracks whether you're present.
   When you leave it registers the separation, feels your absence, and queues up news;
   when you return it greets you first, its warmth scaled by how long you were gone.
@@ -149,6 +158,12 @@ The design borrows from actual human-behavior literature:
   notices separation, keeps vigil for the caregiver's return, and shows a
   reunion-specific greeting. The human's absence-tracking and homecoming greeting
   model exactly this separation → waiting → reunion arc.
+- **Weather and mood** (Denissen et al., 2008): daily weather has a real, modest
+  effect on affect — here it shifts mood valence and, with poor self-care, raises
+  illness risk.
+- **Expressive writing** (Pennebaker): putting the day into words is how people
+  process it — the nightly diary entry doubles as high-quality memory material for
+  later reflection and retrieval.
 
 Sources: [Walker & van der Helm, "Overnight therapy?"](https://pubmed.ncbi.nlm.nih.gov/19702380/) ·
 [Berkeley News on REM and painful memories](https://news.berkeley.edu/2011/11/23/dream-sleep/) ·

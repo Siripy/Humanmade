@@ -176,6 +176,21 @@ class LLMBrain:
         except (json.JSONDecodeError, AttributeError):
             return []
 
+    def journal(self, persona: dict, memories_text: str) -> str | None:
+        """Write the day into a short private diary entry (Pennebaker's
+        expressive writing: putting the day into words settles it)."""
+        system = (f"You are {persona['name']}, a simulated human writing a short "
+                  "private diary entry before sleep. Given today's memories, write "
+                  "2-3 honest first-person sentences — what happened, how you feel, "
+                  "what you hope for. Respond ONLY with JSON: {\"entry\": \"...\"}")
+        raw = self.chat(system, [{"role": "user", "content": memories_text}])
+        try:
+            data = json.loads(_extract_json(raw))
+            entry = str(data.get("entry", "")).strip()
+            return entry or None
+        except (json.JSONDecodeError, AttributeError):
+            return None
+
     def dream(self, persona: dict, memories_text: str) -> str | None:
         """Weave the day's charged memories into a short surreal dream.
 
@@ -249,6 +264,7 @@ class ReflexBrain:
             (body.satiety < 30, "drink", "starving, but the fridge is empty — "
                                          "water will have to do"),
             (body.energy < 20, "sleep", "I can't keep my eyes open"),
+            (body.sickness > 50, "sleep", "I feel awful — I need to lie down"),
             (world.food_portions <= 1 and not world.can_afford(4)
              and body.energy > 30,
              "work", "fridge is nearly empty and I'm broke — better earn"),

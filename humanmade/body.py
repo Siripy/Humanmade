@@ -55,6 +55,13 @@ class Body:
     # Chronotype: shifts the circadian curve. +hours = lark (early), -hours = owl.
     chronotype_offset_hours: float = 0.0
 
+    # Illness: 0 = healthy, 100 = gravely ill. Risk rises with poor hygiene,
+    # exhaustion, and foul weather (chill, set by the agent from the world).
+    sickness: float = 0.0
+    chill: float = 1.0
+    # Ambient mood shift from the environment (weather), set by the agent.
+    ambient_valence: float = 0.0
+
     # Emotional inertia (Koval & Kuppens): mood is autocorrelated, so it lags
     # need-satisfaction rather than snapping to it. Smoothed over ~90 sim-min.
     valence_smoothed: float = 0.0
@@ -145,6 +152,8 @@ class Body:
             self.bladder = clamp(self.bladder + 0.09 * minutes * (0.4 if self.asleep else 1.0))
         self.bowel = clamp(self.bowel + 0.018 * minutes)
 
+        events += self._illness_step(minutes, activity)
+
         events += self._overflow_check()
         events += self._health_update(minutes)
         self._update_vitals(exertion)
@@ -161,6 +170,45 @@ class Body:
         """Apply an immediate emotional jolt (a reunion, a fright) on top of
         the slow-moving smoothed mood."""
         self.valence_smoothed = max(-1.0, min(1.0, self.valence_smoothed + delta))
+
+    # ---------------------------------------------------------------- illness
+
+    def infection_risk_per_minute(self) -> float:
+        """Chance per sim-minute of coming down with something."""
+        risk = 0.00002 * self.chill
+        if self.hygiene < 30:
+            risk *= 3.0
+        if self.energy < 15:
+            risk *= 2.0
+        if self.awake_minutes > 16 * 60:
+            risk *= 2.0
+        return risk
+
+    def _illness_step(self, minutes: float, activity: str) -> list[str]:
+        events: list[str] = []
+        if self.sickness <= 0:
+            if random.random() < self.infection_risk_per_minute() * minutes:
+                self.sickness = 15.0
+                events.append("caught a chill — definitely coming down with something")
+            return events
+        # sick: rest heals, pushing through makes it worse
+        if self.asleep or activity in ("relax", "idle"):
+            self.sickness -= 0.035 * minutes * (1.6 if self.asleep else 1.0)
+        else:
+            self.sickness += 0.012 * minutes
+        if self.sickness <= 0:
+            self.sickness = 0.0
+            events.append("the fever has broken — finally feeling human again")
+            return events
+        self.sickness = clamp(self.sickness)
+        # symptoms drag the body down
+        self.energy = clamp(self.energy - 0.02 * (self.sickness / 100) * minutes)
+        if self.sickness >= 70:
+            events.append("burning with fever — this is getting dangerous")
+        return events
+
+    def take_medicine(self) -> None:
+        self.sickness = max(0.0, self.sickness - 55.0)
 
     # ---------------------------------------------------------------- damage
 
@@ -195,6 +243,8 @@ class Body:
             events.append("hallucinating from sleep deprivation")
         if self.hygiene <= 5:
             drain += (100 / (30 * MINUTES_PER_DAY))   # infection risk
+        if self.sickness >= 70:
+            drain += (100 / (8 * MINUTES_PER_DAY))    # untreated severe illness
 
         if drain > 0:
             self.health = clamp(self.health - drain * minutes)
@@ -208,6 +258,8 @@ class Body:
                 self.cause_of_death = "dehydration"
             elif self.satiety <= 0:
                 self.cause_of_death = "starvation"
+            elif self.sickness >= 70:
+                self.cause_of_death = "an untreated illness"
             else:
                 self.cause_of_death = "organ failure from neglect"
             events.append(f"DIED of {self.cause_of_death}")
@@ -216,10 +268,14 @@ class Body:
     def _update_vitals(self, exertion: float) -> None:
         stress = (100 - self.health) / 100 * 0.3 + max(0, (self.bladder - 80)) / 100
         base_hr = 52.0 if self.asleep else 66.0
-        self.heart_rate = base_hr + 30 * (exertion - 1) + 25 * stress + random.uniform(-2, 2)
+        fever = 2.4 * self.sickness / 100          # up to ~39.1°C
+        self.heart_rate = (base_hr + 30 * (exertion - 1) + 25 * stress
+                           + 12 * self.sickness / 100 + random.uniform(-2, 2))
         self.breaths_per_min = (10 if self.asleep else 14) + 8 * (exertion - 1) + 6 * stress
-        self.spo2 = clamp(98.5 - (100 - self.health) * 0.06 + random.uniform(-0.3, 0.3), 80, 100)
-        self.body_temp_c = 36.7 + 0.4 * (exertion - 1) - (0.5 if self.health < 30 else 0)
+        self.spo2 = clamp(98.5 - (100 - self.health) * 0.06 - 2 * self.sickness / 100
+                          + random.uniform(-0.3, 0.3), 80, 100)
+        self.body_temp_c = (36.7 + 0.4 * (exertion - 1) + fever
+                            - (0.5 if self.health < 30 else 0))
 
     # ---------------------------------------------------------------- affect
 
@@ -229,6 +285,8 @@ class Body:
                  self.fun, self.social, 100 - self.bladder, 100 - self.bowel]
         valence = (sum(needs) / len(needs) - 50) / 50
         valence -= (100 - self.health) / 150
+        valence -= self.sickness / 200          # being ill is miserable
+        valence += self.ambient_valence         # weather et al.
         return max(-1.0, min(1.0, valence))
 
     def mood(self) -> tuple[float, str]:
@@ -251,6 +309,8 @@ class Body:
         if self.hygiene < 25:   urgent.append("filthy, skin itching")
         if self.fun < 15:       urgent.append("mind-numbingly bored")
         if self.social < 15:    urgent.append("achingly lonely")
+        if self.sickness > 40:  urgent.append("feverish and ill — needs rest, "
+                                              "and maybe medicine")
         if self.health < 40:    urgent.append("feels seriously ill")
         return urgent
 
@@ -301,8 +361,9 @@ class Body:
 
         state = "asleep" if self.asleep else "awake"
         _, mood_label = self.mood()
+        sick = (f", SICK ({self.sickness:.0f}/100)" if self.sickness > 0 else "")
         return [
-            f"Day {self.day}, {self.clock} — {state}, feeling {mood_label}",
+            f"Day {self.day}, {self.clock} — {state}, feeling {mood_label}{sick}",
             f"  health    {bar(self.health)}   energy   {bar(self.energy)}",
             f"  hydration {bar(self.hydration)}   satiety  {bar(self.satiety)}",
             f"  bladder   {bar(self.bladder)}   bowel    {bar(self.bowel)}",

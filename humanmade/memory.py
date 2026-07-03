@@ -123,7 +123,7 @@ class MemoryStream:
     @classmethod
     def _heuristic_importance(cls, kind: str, text: str) -> float:
         base = {"reflection": 8.0, "conversation": 5.0, "event": 5.0,
-                "thought": 3.0, "dream": 5.0, "plan": 6.0,
+                "thought": 3.0, "dream": 5.0, "plan": 6.0, "journal": 6.0,
                 "observation": 2.0}.get(kind, 3.0)
         if any(w in text.lower() for w in cls._EMOTIONAL + cls._MILESTONE):
             base = min(10.0, base + 3.0)

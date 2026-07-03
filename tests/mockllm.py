@@ -34,20 +34,24 @@ def start_mock_ollama(decision: dict | None = None,
                       insights: list[str] | None = None,
                       dream: str | None = None,
                       plan: list[str] | None = None,
+                      journal: str | None = None,
                       delay: float = 0.0) -> tuple[HTTPServer, str]:
     """Serve Ollama-shaped /api/chat and /api/tags on an ephemeral port.
 
     Requests are routed by a keyword in the system prompt: reflection
     ("reflective mind") -> insights, dreaming ("dreaming mind") -> dream,
-    planning ("loose plan") -> plan, everything else -> decision. `delay` adds
-    thinking latency to chat responses (availability probes stay fast). Returns
-    (server, base_url); caller should srv.stop() when done.
+    planning ("loose plan") -> plan, diary ("diary entry") -> journal,
+    everything else -> decision. `delay` adds thinking latency to chat
+    responses (availability probes stay fast). Returns (server, base_url);
+    caller should srv.stop() when done.
     """
     decision = decision or DEFAULT_DECISION
     insights = insights if insights is not None else []
     dream = dream if dream is not None else "I was falling through a warm dark sky."
     plan = plan if plan is not None else ["eat breakfast", "work on my hobby",
                                           "reach out to my companion"]
+    journal = journal if journal is not None else ("Quiet day. The apartment felt "
+                                                   "small, but I got things done.")
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):  # keep test output clean
@@ -77,6 +81,8 @@ def start_mock_ollama(decision: dict | None = None,
                 content = json.dumps({"dream": dream})
             elif "loose plan" in system:
                 content = json.dumps({"plan": plan})
+            elif "diary entry" in system:
+                content = json.dumps({"entry": journal})
             else:
                 content = json.dumps(decision)
             self._respond(json.dumps(
