@@ -49,6 +49,14 @@ SLEEP_CHECK_INTERVAL = 90   # thinks less often while asleep
 RECONNECT_PROBE_CHANCE = 0.15  # odds per reflex thought of probing for the LLM
 MIN_RESTORATIVE_SLEEP = 180.0  # sim-min of sleep needed to dream / consolidate
 REUNION_GAP_MINUTES = 20.0     # sim-min apart that counts as a real separation
+EMOTION_HALF_LIFE = 120.0      # sim-min for a discrete emotion to fade by half
+
+# appraisal-derived emotions (OCC-lite) and their immediate mood kick
+EMOTION_VALENCE = {
+    "pride": +0.15, "gratitude": +0.14, "joy": +0.15, "relief": +0.10,
+    "frustration": -0.12, "worry": -0.10, "shame": -0.18, "hurt": -0.12,
+    "loneliness": -0.08,
+}
 
 
 def make_persona(name: str | None = None) -> dict:
@@ -112,6 +120,11 @@ class Human:
         self.last_seen_sim = self.body.sim_minutes
         self.pending_news: list[str] = []   # things saved up to tell you on return
         self._reunion_gap: float | None = None  # sim-min apart, set on return
+
+        # current discrete emotion (appraisal of recent events, decays)
+        self.emotion: str | None = None
+        self.emotion_intensity = 0.0
+        self._evening_indulged = False   # bedtime procrastination, once/night
 
         # the relationship itself develops (social penetration theory)
         self.bond = json.loads(self.memory.get_meta("bond", "null")) or {
@@ -202,8 +215,8 @@ class Human:
             returning = not self.companion_present or gap >= REUNION_GAP_MINUTES
             if returning and gap >= REUNION_GAP_MINUTES:
                 self._reunion_gap = gap
-                # the relief of reunion is a genuine mood jolt
-                self.body.nudge_mood(min(0.4, gap / 6000))
+                # the relief of reunion is a genuine emotional event
+                self._feel("joy", min(0.9, 0.3 + gap / 3000))
                 self._bond_adjust(closeness=1.5)
                 if gap > 48 * 60:   # abandoned for days — it noticed
                     self._bond_adjust(trust=-3.0, closeness=-1.0)
@@ -236,6 +249,7 @@ class Human:
             bought = self.world.restock(portions)
             if bought > 0:
                 self._bond_adjust(trust=2.5)
+                self._feel("gratitude", 0.6)
                 self.memory.add("event",
                                 f"My companion ordered groceries — {bought} portions, "
                                 f"paid from my credits ({self.world.money:.0f} left).",
@@ -260,6 +274,7 @@ class Human:
                 return {"ok": False, "reason": "broke", "money": self.world.money}
             self.body.take_medicine()
             self._bond_adjust(trust=5.0, closeness=2.0)  # they took care of me
+            self._feel("gratitude", 0.9)
             self.memory.add("event", "My companion ordered medicine for me. "
                             "I already feel it working.", self.body.sim_minutes,
                             importance=7)
@@ -303,9 +318,12 @@ class Human:
                 self.memory.add("event", e, self.body.sim_minutes,
                                 importance=9 if "DIED" in e else 7)
                 self._note_news(e)
+                self._appraise_event(e)
             if not self.body.alive:
                 self._die()
                 return
+
+            self._decay_emotion(sim_minutes)
 
             self._handle_sleep_transitions()
 
@@ -368,6 +386,33 @@ class Human:
         except BrainError:
             return None
 
+    # --------------------------------------------------------------- emotions
+
+    def _feel(self, label: str, intensity: float) -> None:
+        """Appraise an event into a discrete emotion (OCC-lite). The stronger
+        feeling wins; every emotion also kicks the slow-moving mood."""
+        if intensity >= self.emotion_intensity:
+            self.emotion, self.emotion_intensity = label, min(1.0, intensity)
+        self.body.nudge_mood(EMOTION_VALENCE.get(label, 0.0) * intensity)
+
+    def _decay_emotion(self, sim_minutes: float) -> None:
+        if self.emotion_intensity > 0:
+            self.emotion_intensity *= 0.5 ** (sim_minutes / EMOTION_HALF_LIFE)
+            if self.emotion_intensity < 0.05:
+                self.emotion, self.emotion_intensity = None, 0.0
+
+    def _appraise_event(self, event: str) -> None:
+        """Body/world events carry emotional meaning (appraisal theory)."""
+        e = event.lower()
+        if "accident" in e or "wet the bed" in e:
+            self._feel("shame", 0.9)
+        elif "coming down with" in e:
+            self._feel("worry", 0.6)
+        elif "burning with fever" in e:
+            self._feel("worry", 0.9)
+        elif "fever has broken" in e or "woke up naturally" in e:
+            self._feel("relief", 0.5)
+
     # ------------------------------------------------------------ daily rhythm
 
     ANNIVERSARIES = (7, 30, 60, 90, 180, 365)
@@ -403,6 +448,7 @@ class Human:
                 self._dreamed_this_sleep = True
                 self._begin_dream()
         elif was and not is_now:                  # just woke
+            self._evening_indulged = False
             slept = now - self._sleep_started_sim
             if slept >= MIN_RESTORATIVE_SLEEP:
                 softened = self.memory.soften_emotional_charge(now)
@@ -516,9 +562,16 @@ class Human:
             f"hygiene:{b.hygiene:.0f} fun:{b.fun:.0f} social:{b.social:.0f} "
             f"health:{b.health:.0f} (all 0-100)",
         ]
+        if self.emotion and self.emotion_intensity > 0.15:
+            lines.append(f"A feeling of {self.emotion} sits with you "
+                         f"({self.emotion_intensity:.1f}/1).")
         urgent = b.urgent_needs()
         if urgent:
             lines.append("URGENT: " + "; ".join(urgent))
+        if (b.mood()[0] < -0.25 and b.satiety < 75 and b.satiety > 40
+                and self.world.food_portions > 0):
+            lines.append("Comfort food is calling. You're not really hungry, "
+                         "but it might help.")
         if b.sickness > 0:
             lines.append(f"You are ill (severity {b.sickness:.0f}/100). Rest and "
                          "sleep help; medicine (12 credits) works fast, but only "
@@ -562,6 +615,10 @@ class Human:
         if known:
             lines.append("What you know about them: "
                          + "; ".join(m.text for m in known))
+        if self.bond["closeness"] < 35 and b.mood()[0] < -0.3:
+            lines.append("You feel low, but you don't know them well enough to "
+                         "unload. If they ask how you are, you'd probably just "
+                         "say you're fine.")
         if self._reunion_gap is not None:
             gap_h = self._reunion_gap / 60.0
             span = (f"{gap_h:.1f} hours" if gap_h >= 1 else
@@ -695,8 +752,31 @@ class Human:
         self.on_event(f"(instinct overrides the mind — the body demands: {forced})")
         return {**decision, "action": forced, "_forced": True}
 
+    def _temptation(self, decision: dict) -> dict:
+        """Humans are reliably suboptimal in trait-consistent ways.
+
+        Low conscientiousness shows up as bedtime procrastination ("one more
+        chapter") and plan procrastination ("I'll start properly in a bit").
+        """
+        b = self.body
+        give_in = 0.65 * (1.0 - self.plan_adherence)
+        if (decision["action"] == "sleep" and not b.asleep and b.energy > 12
+                and b.fun < 55 and not self._evening_indulged
+                and random.random() < give_in):
+            self._evening_indulged = True
+            self.on_event(f"({self.persona['name']} means to sleep… "
+                          "but, one more chapter)")
+            return {**decision, "action": "relax"}
+        if decision["action"] == "work" and random.random() < give_in * 0.6:
+            self.on_event(f"({self.persona['name']} will start properly "
+                          "in a bit. Honest.)")
+            return {**decision, "action": "relax"}
+        return decision
+
     def _apply_decision(self, decision: dict, perception: str, heard: bool) -> None:
         decision = self._survival_override(decision)
+        if not decision.get("_forced"):
+            decision = self._temptation(decision)
         self.conversation.append({"role": "user",
                                   "content": self._compact_perception(perception)})
         self.conversation.append({"role": "assistant", "content": json.dumps(decision)})
@@ -751,12 +831,18 @@ class Human:
         narration = None
         if action == "eat":
             if self.world.take_meal():
+                comfort = b.satiety > 55 and b.mood()[0] < -0.15
                 b.eat()
-                narration = "eats a meal"
+                if comfort:
+                    b.fun = min(100.0, b.fun + 8)
+                    narration = "raids the fridge for comfort food — it helps, a little"
+                else:
+                    narration = "eats a meal"
                 if self.world.food_portions <= 2:
                     narration += f" — only {self.world.food_portions} portions left"
             else:
                 narration = "opens the fridge… it's empty. Nothing to eat."
+                self._feel("frustration", 0.7)
                 self.memory.add("event", "The fridge is empty. I cannot eat until "
                                 "my companion restocks it.", b.sim_minutes, importance=8)
                 action = "idle"
@@ -786,6 +872,7 @@ class Human:
             new = old + random.uniform(1.0, 2.0)  # a real project takes weeks
             for milestone in (25, 50, 75):
                 if old < milestone <= new:
+                    self._feel("pride", 0.7)
                     self.on_event(f"({hobby} just passed {milestone}% — "
                                   "it's really taking shape)")
                     self.memory.add("event", f"My {hobby} passed {milestone}%. "
@@ -794,6 +881,7 @@ class Human:
                     self._note_news(f"made real progress on {hobby} ({milestone}%)")
             if new >= 100:
                 new = 0.0
+                self._feel("pride", 1.0)
                 self.on_event(f"({self.persona['name']} FINISHED {hobby}! "
                               "Already dreaming up the next one.)")
                 self.memory.add("event", f"I FINISHED {hobby} today. I actually "
