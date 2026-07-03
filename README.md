@@ -19,9 +19,10 @@ you> _
 
 ## Quick start
 
-Requires Python 3.10+ and **zero dependencies**. For the full mind, run any local
-model server; without one, a rule-based "brainstem" keeps the body alive until the
-model comes online.
+Requires Python 3.10+ and **zero required dependencies**. For the full mind, run
+any local model server; without one, a rule-based "brainstem" keeps the body alive
+until the model comes online. [Playwright](https://playwright.dev/) is an optional
+extra, only needed if you turn on [web browsing](#seeing-the-web-optional-off-by-default).
 
 ```bash
 # 1. (recommended) start a local model
@@ -49,6 +50,7 @@ server's `base_url` in `config.json`. `OLLAMA_HOST` is honored when
 | `/dream` | recall what it dreamt last night |
 | `/journal [n]` | read its private diary (written at bedtime) |
 | `/medicine` | order medicine when it's sick — paid from its credits |
+| `/web [n]` | what it's read online recently (needs `internet.enabled`) |
 | `/speed <n>` | sim-minutes per real second (default 1) |
 | `/thoughts` | toggle the inner monologue |
 | `/newlife` | after a death, a new person is born (old memories archived) |
@@ -62,6 +64,30 @@ sleeps and dreams, and **saves up things to tell you**. When you return it notic
 how long you were apart and greets you first, colored by its mood and what
 happened while it waited (attachment theory, below). Leave it running overnight at
 a low `/speed` and it'll have a day's worth of life — and a dream — to recount.
+
+### Seeing the web (optional, off by default)
+
+With `internet.enabled: true` in `config.json` and `pip install playwright &&
+playwright install chromium`, the human can sit down at its own computer and
+actually look things up — a real, rendered browser tab, not a text scrape. It sees
+only what's inside a fixed **viewport**, exactly like looking at a screen: nothing
+below the fold exists until it scrolls there, nothing behind a link exists until it
+clicks. Each glance it decides, on its own, whether to scroll, click something that
+caught its eye, go back, or stop looking — a **gaze loop**, budgeted by curiosity
+(the more open its personality, the longer it'll wander). When it's done it reacts
+honestly to what it saw: a memory forms, sometimes a fact becomes a **lesson**, an
+emotion (curiosity, amusement, unease, boredom) colors its mood, and if something
+was worth telling you it's saved as news for your next reunion. `/web` shows what
+it's read.
+
+Every session is a fresh, cookie-less tab, closed when it's done — it never
+"remembers" being logged in anywhere because it never was. Safety is enforced at
+the browser, not by asking the model nicely: every request but a plain `GET` is
+aborted, downloads are cancelled, popups never open, and navigation outside the
+configured allowlist (Wikipedia by default) never loads — the human can look, but
+there is no "type" or "submit" anywhere in its vocabulary. See `humanmade/internet.py`
+for the whole thing; `tests/test_internet.py` and `tests/test_browsing.py` exercise
+it end to end against a local mock website, no real network required.
 
 ## How it works
 
@@ -150,6 +176,11 @@ a low `/speed` and it'll have a day's worth of life — and a dream — to recou
   you feeling worse lately"). *Habits*: repeated behavior at consistent hours
   becomes its routine — a chronotype-true bedtime emerges within days, and `/habits`
   shows what it has settled into.
+- **Sight, optionally** (`humanmade/internet.py`) — with a real (local) browser
+  behind it, the human can look things up online: a viewport-limited gaze loop that
+  scrolls, clicks, and reads exactly as looking at a screen does, structurally
+  read-only (GET requests only, no downloads, no popups, allowlisted navigation).
+  See "Seeing the web" above.
 
 ## Research notes
 
@@ -209,13 +240,19 @@ The design borrows from actual human-behavior literature:
 - **Habit formation** (Lally et al., 2010): behaviors repeated in stable contexts
   become automatic over weeks — modeled as per-hour routine histograms that decay
   without reinforcement, with circadian-gated sleep so bedtimes phase-lock.
+- **Foveated vision and eye-movement control** (Rayner, 2009): human reading and
+  scene perception work through discrete fixations on a small high-resolution
+  region, with the rest of a scene perceived only vaguely until attention moves
+  there — the model for the browsing gaze loop's viewport-only sight, one glance
+  (scroll, click, or back) at a time rather than reading a whole page at once.
 
 Sources: [Walker & van der Helm, "Overnight therapy?"](https://pubmed.ncbi.nlm.nih.gov/19702380/) ·
 [Berkeley News on REM and painful memories](https://news.berkeley.edu/2011/11/23/dream-sleep/) ·
 [Houben et al., emotion dynamics & well-being](https://ppw.kuleuven.be/okp/_pdf/Houben2015TRBST.pdf) ·
 [Park et al., Generative Agents](https://dl.acm.org/doi/fullHtml/10.1145/3586183.3606763) ·
 [Montaruli et al., chronotype & health](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC8063933/) ·
-[Ainsworth's Strange Situation](https://www.simplypsychology.org/mary-ainsworth.html)
+[Ainsworth's Strange Situation](https://www.simplypsychology.org/mary-ainsworth.html) ·
+[Rayner, eye movements & attention in reading/scene perception/visual search](https://pubmed.ncbi.nlm.nih.gov/19449261/)
 
 ## State & persistence
 
@@ -237,6 +274,17 @@ archived as `memory-<timestamp>.sqlite3` after death.
     "temperature": 0.9,
     "timeout_seconds": 120,
     "embed_timeout_seconds": 5
+  },
+  "internet": {
+    "enabled": false,
+    "allowlist": ["en.wikipedia.org", "*.wikipedia.org"],
+    "start_urls": [],
+    "max_glances": 8,
+    "cooldown_minutes": 90,
+    "session_timeout_seconds": 45,
+    "nav_timeout_seconds": 10,
+    "viewport": {"width": 1280, "height": 800},
+    "chromium_path": null
   }
 }
 ```
@@ -247,10 +295,17 @@ llama.cpp, vLLM) at its `base_url`.
 Small models (3B–8B) work fine — the JSON decision format is deliberately simple.
 Better models produce a more interesting inner life.
 
+`internet.enabled` is `false` by default — see "Seeing the web" above. When on,
+`allowlist` bounds where it can navigate (wildcards like `*.wikipedia.org` work),
+`start_urls` are the "usual sites" it can wander to when it isn't looking for
+anything in particular (otherwise a query becomes a Wikipedia search), and
+`chromium_path` only needs setting if Playwright can't find its browser on its own.
+
 ## Development
 
-Tests are stdlib-only (`unittest`) and need no real model — an in-process mock
-Ollama server (`tests/mockllm.py`) stands in for the mind:
+Tests are stdlib-only (`unittest`) and need no real model or real internet — an
+in-process mock Ollama server (`tests/mockllm.py`) stands in for the mind, and a
+tiny local website (`tests/mockweb.py`) stands in for the web:
 
 ```bash
 python -m unittest -v
@@ -261,4 +316,8 @@ retrieval and persistence, decision parsing, reflex priorities, asynchronous
 thinking, LLM-failure fallback, reincarnation, the behavior layer (chronotype,
 emotional inertia, dreams, overnight consolidation, daily planning, the
 away/return reunion flow), the credit economy, semantic memory embeddings,
-conversation compression, and first-run naming.
+conversation compression, first-run naming, and — when
+[Playwright](https://playwright.dev/) is installed — real browsing (viewport-only
+sight, link-following, scrolling, the read-only safety layer, and the full
+browse-action lifecycle) against the local mock website, with zero real network
+access.

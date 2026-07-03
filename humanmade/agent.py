@@ -21,8 +21,9 @@ import random
 import threading
 import time
 
+from . import internet
 from .body import Body
-from .brain import BrainError, LLMBrain, ReflexBrain
+from .brain import ACTIONS, BrainError, LLMBrain, ReflexBrain
 from .memory import MemoryStream
 from .personality import agent_knobs, body_knobs, derive_disposition
 from .world import World
@@ -42,7 +43,7 @@ CHRONOTYPES = {
 
 ACTION_DURATION = {  # sim-minutes each action occupies
     "eat": 20, "drink": 3, "toilet": 6, "shower": 12, "sleep": 0,  # sleep = until wake
-    "wake": 1, "exercise": 40, "relax": 45, "work": 60, "idle": 20,
+    "wake": 1, "exercise": 40, "relax": 45, "work": 60, "browse": 20, "idle": 20,
 }
 DECISION_INTERVAL = 30      # sim-minutes between spontaneous thoughts
 SLEEP_CHECK_INTERVAL = 90   # thinks less often while asleep
@@ -54,9 +55,13 @@ EMOTION_HALF_LIFE = 120.0      # sim-min for a discrete emotion to fade by half
 # appraisal-derived emotions (OCC-lite) and their immediate mood kick
 EMOTION_VALENCE = {
     "pride": +0.15, "gratitude": +0.14, "joy": +0.15, "relief": +0.10,
+    "curiosity": +0.08, "amusement": +0.10,
     "frustration": -0.12, "worry": -0.10, "shame": -0.18, "hurt": -0.12,
-    "loneliness": -0.08,
+    "loneliness": -0.08, "unease": -0.08, "boredom": -0.06,
 }
+# what a browsing session's self-reported "emotion" maps onto here
+_WEB_EMOTION_MAP = {"curious": "curiosity", "amused": "amusement",
+                    "unsettled": "unease", "bored": "boredom", "moved": "joy"}
 
 SKILLS = ("craft", "cooking", "fitness")   # 0-100, power law of practice
 SKILL_DECAY_PER_DAY = 0.08                 # disuse slowly erodes ability
@@ -170,6 +175,14 @@ class Human:
         self._embed_interval = float(config.get("embed_interval_seconds", 5.0))
         threading.Thread(target=self._embed_loop, daemon=True,
                          name="humanmade-hippocampus").start()
+
+        # the web: a window it can choose to look through, off by default
+        self._internet_config = dict(config.get("internet", {}))
+        self.internet_enabled = bool(self._internet_config.get("enabled", False))
+        self.browse_cooldown_minutes = float(
+            self._internet_config.get("cooldown_minutes", 90))
+        self._last_browse_sim = -10 ** 9
+        self._browse_unavailable = False  # flips true once, if Playwright is missing
 
     def _apply_disposition(self) -> None:
         """Wire the persona's temperament into body and behavior parameters."""
@@ -457,8 +470,13 @@ class Human:
 
     # ----------------------------------------------- learning from experience
 
+    # browse is deliberately excluded from TRACKED_FEELINGS: its mood payoff
+    # lands asynchronously (a real browsing session, not an instant effect),
+    # so a before/after mood delta at the next think cycle wouldn't reliably
+    # bracket it. Its emotional effect is instead applied directly and
+    # immediately in _apply_browse_result when the session actually finishes.
     TRACKED_FEELINGS = ("work", "exercise", "relax")   # deliberate activities
-    HABIT_ACTIONS = ("eat", "sleep", "shower", "work", "exercise")
+    HABIT_ACTIONS = ("eat", "sleep", "shower", "work", "exercise", "browse")
 
     def _update_action_feel(self) -> None:
         """Instrumental learning, lightweight: how did the last activity
@@ -689,6 +707,78 @@ class Human:
 
         threading.Thread(target=worker, daemon=True, name="humanmade-plan").start()
 
+    # ------------------------------------------------------------------- web
+
+    def _begin_browse_session(self, query: str | None) -> None:
+        """A real, rendered browsing session on a worker thread — the body
+        keeps living (and could be dragged away by a survival need) while a
+        real page loads and is actually read, glance by glance. See
+        internet.py for the sight model and internet.run_browse_session for
+        the gaze loop itself; this just wires its result back into a life."""
+        persona_snapshot = dict(self.persona)
+        life_id = self._life_id
+        cfg = self._internet_config
+
+        def worker() -> None:
+            try:
+                result = internet.run_browse_session(self.llm, persona_snapshot,
+                                                      query, cfg)
+            except internet.BrowserUnavailable as e:
+                result = {"error": str(e), "unavailable": True}
+            except Exception as e:  # a bad page must never take the body with it
+                result = {"error": f"unexpected: {e!r}"}
+            with self.lock:
+                if life_id != self._life_id:
+                    return
+                self._apply_browse_result(result)
+
+        threading.Thread(target=worker, daemon=True, name="humanmade-browse").start()
+
+    def _apply_browse_result(self, result: dict) -> None:
+        name = self.persona["name"]
+        if result.get("unavailable"):
+            self._browse_unavailable = True
+            self.on_event(f"({name} tries to get online, but this computer has "
+                          "no working browser — giving up on that for now)")
+            return
+        if result.get("error"):
+            self.on_event(f"{name} gives up trying to get online — "
+                          "the page wouldn't load.")
+            self.memory.add("observation", "Tried to look something up online "
+                            "but couldn't connect.", self.body.sim_minutes,
+                            importance=3)
+            return
+
+        summary = result.get("summary")
+        if not summary:
+            self.on_event(f"{name} closes the browser, nothing much to show for it.")
+            return
+
+        importance = 6.0
+        emotion = result.get("emotion")
+        label = _WEB_EMOTION_MAP.get(emotion)
+        if label:
+            self._feel(label, 0.5)
+            importance = 7.0
+        self.memory.add("web", summary, self.body.sim_minutes, importance=importance)
+
+        openness = self.persona.get("disposition", {}).get(
+            "dimensions", {}).get("openness", 0.5)
+        self.body.fun = min(100.0, self.body.fun + 10 * (0.6 + openness))
+
+        fact = result.get("fact_learned")
+        if fact:
+            existing = {m.text.lower() for m in self.memory.recent(
+                12, kinds=("lesson",))}
+            if fact.lower() not in existing:
+                self.memory.add("lesson", fact, self.body.sim_minutes, importance=7)
+
+        share = result.get("share")
+        if share:
+            self._note_news(f"wants to tell you about something they read: {share}")
+
+        self.on_event(f"{name} closes the browser — {summary}")
+
     # ------------------------------------------------------------------- news
 
     def _note_news(self, text: str) -> None:
@@ -820,6 +910,13 @@ class Human:
                          "something to say or ask, say it — no one will prompt you.")
         return lines
 
+    def _available_actions(self) -> dict[str, str]:
+        """The action list actually offered to the mind — "browse" only
+        appears once the web is switched on and known to work."""
+        if self.internet_enabled and not self._browse_unavailable:
+            return ACTIONS
+        return {a: desc for a, desc in ACTIONS.items() if a != "browse"}
+
     def _begin_think(self) -> None:
         """Snapshot perception and start deciding. Reflex decisions are instant;
         LLM decisions run on a worker thread and land on a later tick."""
@@ -840,10 +937,12 @@ class Human:
         self._think_seq += 1
         seq = self._think_seq
         conversation = list(self.conversation)
+        actions = self._available_actions()
 
         def worker() -> None:
             try:
-                decision = self.llm.decide(self.persona, perception, conversation)
+                decision = self.llm.decide(self.persona, perception, conversation,
+                                           actions=actions)
                 outcome = {"decision": decision, "error": None}
             except BrainError as e:
                 outcome = {"decision": None, "error": str(e)}
@@ -1011,11 +1110,13 @@ class Human:
             self.memory.add("thought", "I heard them but didn't feel like answering.",
                             self.body.sim_minutes, importance=2)
 
-        self._perform(decision["action"], forced=decision.get("_forced", False))
+        self._perform(decision["action"], forced=decision.get("_forced", False),
+                      browse_query=decision.get("browse_query"))
 
     # ----------------------------------------------------------------- action
 
-    def _perform(self, action: str, forced: bool = False) -> None:
+    def _perform(self, action: str, forced: bool = False,
+                browse_query: str | None = None) -> None:
         b = self.body
         if b.asleep and action not in ("wake", "idle", "sleep"):
             if forced:
@@ -1096,6 +1197,16 @@ class Human:
                                 b.sim_minutes, importance=9)
                 self._note_news(f"finished {hobby}!")
             self.persona["hobby_progress"] = new
+        elif action == "browse":
+            can_go = (self.internet_enabled and not self._browse_unavailable
+                     and self.llm_online and b.sim_minutes - self._last_browse_sim
+                     >= self.browse_cooldown_minutes)
+            if can_go:
+                self._last_browse_sim = b.sim_minutes
+                narration = "settles in at the computer, browser open"
+                self._begin_browse_session(browse_query)
+            else:
+                action = "idle"   # nothing to do at a computer going nowhere
 
         self.current_action = action
         self.action_minutes_left = ACTION_DURATION.get(action, 20)
@@ -1181,6 +1292,7 @@ class Human:
             self._dreamed_this_sleep = False
             self._planning = False
             self._last_journal_sim = -10 ** 9
+            self._last_browse_sim = -10 ** 9
             self.companion_present = True
             self.last_seen_sim = self.body.sim_minutes
             self.pending_news.clear()

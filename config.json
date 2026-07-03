@@ -9,5 +9,16 @@
     "temperature": 0.9,
     "timeout_seconds": 120,
     "embed_timeout_seconds": 5
+  },
+  "internet": {
+    "enabled": false,
+    "allowlist": ["en.wikipedia.org", "*.wikipedia.org"],
+    "start_urls": [],
+    "max_glances": 8,
+    "cooldown_minutes": 90,
+    "session_timeout_seconds": 45,
+    "nav_timeout_seconds": 10,
+    "viewport": {"width": 1280, "height": 800},
+    "chromium_path": null
   }
 }

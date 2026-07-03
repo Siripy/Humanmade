@@ -27,8 +27,10 @@ ACTIONS = {
     "exercise": "work out for a while (tiring, but good for mood)",
     "relax":    "read / listen to music / unwind (restores fun)",
     "work":     "focus on your hobby project (mild fun, feels meaningful)",
+    "browse":   "sit at your computer and look something up online",
     "idle":     "do nothing in particular",
 }
+GAZE_MOVES = ("scroll", "click", "back", "done")
 
 SYSTEM_PROMPT = """You are the inner mind of {name}, a simulated human being — NOT an AI assistant.
 {name} is {age} years old. Personality: {personality}. Temperament: {temperament}.
@@ -44,12 +46,18 @@ When you feel lonely, curious, or something matters to you, speak first — ask
 questions, share thoughts, complain, joke. Never sound like an assistant; never
 offer to help. You have your own wants.
 
+If "browse" is available to you and you choose it, you're sitting down at your own
+computer to actually look something up — say what's on your mind (your hobby, a
+worry, plain curiosity, or nothing in particular) as browse_query; you'll see what
+you find and react to it afterward.
+
 Respond ONLY with a single JSON object, no other text:
 {{"thought": "<your private inner monologue, 1-2 sentences>",
   "action": "<one of: {actions}>",
   "say": "<words spoken aloud to your companion, or null to stay silent>",
   "note_about_companion": "<a NEW fact you just learned about your companion worth remembering, or null>",
   "lesson_learned": "<a NEW rule for living you just learned — from advice you trust or from hard experience — or null>",
+  "browse_query": "<if action is browse: what you want to look up, or null to just wander>",
   "importance": <1-10, how memorable this moment is>}}"""
 
 
@@ -142,19 +150,20 @@ class LLMBrain:
 
     # -- cognition
 
-    def decide(self, persona: dict, context: str,
-               conversation: list[dict]) -> dict:
+    def decide(self, persona: dict, context: str, conversation: list[dict],
+               actions: dict[str, str] | None = None) -> dict:
+        actions = actions if actions is not None else ACTIONS
         temperament = persona.get("disposition", {}).get(
             "description", "fairly even-keeled")
         system = SYSTEM_PROMPT.format(
             name=persona["name"], age=persona["age"],
             personality=persona["personality"], temperament=temperament,
             backstory=persona["backstory"],
-            actions=", ".join(ACTIONS),
+            actions=", ".join(actions),
         )
         messages = conversation[-12:] + [{"role": "user", "content": context}]
         raw = self.chat(system, messages)
-        return _parse_decision(raw)
+        return _parse_decision(raw, actions)
 
     def reflect(self, persona: dict, memories_text: str) -> list[str]:
         system = (f"You are the reflective mind of {persona['name']}, a simulated human. "
@@ -197,6 +206,63 @@ class LLMBrain:
         except (json.JSONDecodeError, AttributeError):
             return None
 
+    def gaze(self, persona: dict, glimpse_text: str, glances_left: int) -> dict:
+        """One glance at a real, rendered webpage: decide what to do next,
+        exactly as a person looking at a screen would — scroll to read more,
+        click something that caught their eye, go back, or stop looking.
+        Sees only what's described (the current viewport), nothing more."""
+        system = (f"You are {persona['name']}, a simulated human looking at a "
+                  "webpage on your own computer, exactly as a person looks at a "
+                  "screen. You only know what's described below — nothing "
+                  "you haven't scrolled to or clicked into yet. "
+                  f"You have about {glances_left} glances left before you'll "
+                  "move on to something else.\n"
+                  'Respond ONLY with JSON: {"move": "scroll"|"click"|"back"|"done", '
+                  '"target": "<the exact visible link text to click, or null>", '
+                  '"remark": "<a brief private reaction to what you see, or null>"}')
+        raw = self.chat(system, [{"role": "user", "content": glimpse_text}])
+        try:
+            data = json.loads(_extract_json(raw))
+        except (BrainError, json.JSONDecodeError):
+            return {"move": "done", "target": None, "remark": None}
+        move = str(data.get("move", "done")).lower().strip()
+        if move not in GAZE_MOVES:
+            move = "done"
+
+        def _clean(value):
+            return value if isinstance(value, str) and value.strip() else None
+
+        return {"move": move, "target": _clean(data.get("target")),
+                "remark": _clean(data.get("remark"))}
+
+    def web_digest(self, persona: dict, transcript: str) -> dict:
+        """The session's over; react honestly to what was actually seen."""
+        system = (f"You are {persona['name']}, a simulated human who just "
+                  "finished browsing the web on your computer. Given what you "
+                  "saw (below), react honestly and in first person. Respond "
+                  'ONLY with JSON: {"summary": "<1-2 sentences: what you looked '
+                  'at and what you made of it, for your own memory>", '
+                  '"share": "<a sentence you might tell your companion about it, '
+                  'or null if not worth mentioning>", '
+                  '"emotion": "<one of: curious, amused, unsettled, bored, moved '
+                  '— or null>", '
+                  '"fact_learned": "<one specific fact or rule worth remembering, '
+                  'or null>"}')
+        raw = self.chat(system, [{"role": "user", "content": transcript}])
+        try:
+            data = json.loads(_extract_json(raw))
+        except (BrainError, json.JSONDecodeError):
+            return {"summary": None, "share": None, "emotion": None,
+                    "fact_learned": None}
+
+        def _clean(value):
+            return value if isinstance(value, str) and value.strip() else None
+
+        return {"summary": _clean(data.get("summary")),
+                "share": _clean(data.get("share")),
+                "emotion": _clean(data.get("emotion")),
+                "fact_learned": _clean(data.get("fact_learned"))}
+
     def dream(self, persona: dict, memories_text: str) -> str | None:
         """Weave the day's charged memories into a short surreal dream.
 
@@ -223,13 +289,14 @@ def _extract_json(raw: str) -> str:
     return match.group(0)
 
 
-def _parse_decision(raw: str) -> dict:
+def _parse_decision(raw: str, valid_actions: dict[str, str] | None = None) -> dict:
+    valid_actions = valid_actions if valid_actions is not None else ACTIONS
     try:
         data = json.loads(_extract_json(raw))
     except json.JSONDecodeError as e:
         raise BrainError(f"unparseable decision: {raw[:200]!r}") from e
     action = str(data.get("action", "idle")).lower().strip()
-    if action not in ACTIONS:
+    if action not in valid_actions:
         action = "idle"
 
     def _clean(value):
@@ -247,6 +314,7 @@ def _parse_decision(raw: str) -> dict:
         "say": _clean(data.get("say")),
         "note_about_companion": _clean(data.get("note_about_companion")),
         "lesson_learned": _clean(data.get("lesson_learned")),
+        "browse_query": _clean(data.get("browse_query")),
         "importance": max(1.0, min(10.0, importance)),
     }
 
@@ -296,4 +364,4 @@ class ReflexBrain:
     def _d(thought: str, action: str, importance: float = 2.0) -> dict:
         return {"thought": thought, "action": action, "say": None,
                 "note_about_companion": None, "lesson_learned": None,
-                "importance": importance}
+                "browse_query": None, "importance": importance}

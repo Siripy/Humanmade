@@ -30,17 +30,27 @@ def fake_embedding(text: str) -> list[float]:
     return [v / norm for v in vec]
 
 
+DEFAULT_GAZE = {"move": "done", "target": None, "remark": None}
+DEFAULT_WEB_DIGEST = {"summary": "Looked at a page for a bit.", "share": None,
+                      "emotion": "curious", "fact_learned": None}
+
+
 def start_mock_ollama(decision: dict | None = None,
                       insights: list[str] | None = None,
                       dream: str | None = None,
                       plan: list[str] | None = None,
                       journal: str | None = None,
+                      gaze_script: list[dict] | None = None,
+                      web_digest: dict | None = None,
                       delay: float = 0.0) -> tuple[HTTPServer, str]:
     """Serve Ollama-shaped /api/chat and /api/tags on an ephemeral port.
 
     Requests are routed by a keyword in the system prompt: reflection
     ("reflective mind") -> insights, dreaming ("dreaming mind") -> dream,
     planning ("loose plan") -> plan, diary ("diary entry") -> journal,
+    a glance at a page ("looking at a webpage") -> the next entry of
+    gaze_script (popped in order; repeats the last/default once exhausted),
+    the end of a browsing session ("just finished browsing") -> web_digest,
     everything else -> decision. `delay` adds thinking latency to chat
     responses (availability probes stay fast). Returns (server, base_url);
     caller should srv.stop() when done.
@@ -52,6 +62,15 @@ def start_mock_ollama(decision: dict | None = None,
                                           "reach out to my companion"]
     journal = journal if journal is not None else ("Quiet day. The apartment felt "
                                                    "small, but I got things done.")
+    gaze_script = list(gaze_script) if gaze_script is not None else [DEFAULT_GAZE]
+    web_digest = web_digest if web_digest is not None else DEFAULT_WEB_DIGEST
+    gaze_lock = threading.Lock()
+
+    def next_gaze() -> dict:
+        with gaze_lock:
+            if len(gaze_script) > 1:
+                return gaze_script.pop(0)
+            return gaze_script[0] if gaze_script else DEFAULT_GAZE
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):  # keep test output clean
@@ -83,6 +102,10 @@ def start_mock_ollama(decision: dict | None = None,
                 content = json.dumps({"plan": plan})
             elif "diary entry" in system:
                 content = json.dumps({"entry": journal})
+            elif "looking at a webpage" in system:
+                content = json.dumps(next_gaze())
+            elif "just finished browsing" in system:
+                content = json.dumps(web_digest)
             else:
                 content = json.dumps(decision)
             self._respond(json.dumps(

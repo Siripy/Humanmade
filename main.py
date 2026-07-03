@@ -13,7 +13,8 @@ Commands:
   /plan          see today's plan        /dream        recall last night's dream
   /journal [n]   read its diary          /medicine     order medicine when sick
   /bond          how it feels about you  /habits       its learned routine
-  /newlife       start a new person     /quit          save and exit
+  /web [n]       what it's read online   /newlife      start a new person
+  /quit          save and exit
 """
 
 import json
@@ -77,6 +78,9 @@ def main() -> None:
              else f"OFFLINE — reflex survival mode. Start your local model "
                   f"(e.g. `ollama run {human.llm.model}`) and it will reconnect.")
           + C_RESET)
+    if human.internet_enabled:
+        print(f"{C_EVENT}Internet: on — {human.persona['name']} can browse "
+              f"(allowlist: {', '.join(human._internet_config.get('allowlist') or ['en.wikipedia.org', '*.wikipedia.org'])}){C_RESET}")
     print(f"{C_EVENT}{name}, {human.persona['age']} — {human.persona['personality']} "
           f"({human.persona.get('chronotype', 'intermediate')}). "
           f"{human.memory.count()} memories on record.{C_RESET}\n")
@@ -176,6 +180,25 @@ def main() -> None:
                     else:
                         print(f"{name}'s diary is still blank "
                               "(entries are written at bedtime, LLM brain online).")
+            elif line.startswith("/web"):
+                parts = line.split()
+                n = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 5
+                with human.lock:
+                    entries = human.memory.recent(n, kinds=("web",))
+                with print_lock:
+                    if not human.internet_enabled:
+                        print(f"{name} doesn't have internet access "
+                              '(set "internet": {"enabled": true} in config.json).')
+                    elif human._browse_unavailable:
+                        print(f"{name} tried to get online, but this computer has "
+                              "no working browser (pip install playwright && "
+                              "playwright install chromium).")
+                    elif entries:
+                        for m in entries:
+                            d = int(m.sim_minutes // 1440)
+                            print(f"  [day {d}] {m.text}")
+                    else:
+                        print(f"{name} hasn't looked anything up yet.")
             elif line == "/medicine":
                 r = human.medicine()
                 if r["ok"]:
