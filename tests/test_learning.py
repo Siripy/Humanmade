@@ -160,5 +160,120 @@ class TestLessons(unittest.TestCase):
             reborn.memory.close()
 
 
+class TestConsequenceLearning(unittest.TestCase):
+    def test_repeated_bad_outcomes_surface_as_a_hint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            human, _, _ = _human(tmp)
+            for _ in range(4):     # exercise keeps ending in a worse mood
+                human._mood_at_action = ("exercise", 0.4)
+                human.body.valence_smoothed = 0.2
+                human._update_action_feel()
+            hints = " ".join(human._experience_hints())
+            self.assertIn("exercise", hints)
+            self.assertIn("feeling worse", hints)
+            self.assertIn("feeling worse", human._perception())
+            human.memory.close()
+
+    def test_good_outcomes_are_learned_too(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            human, _, _ = _human(tmp)
+            for _ in range(4):
+                human._mood_at_action = ("relax", -0.2)
+                human.body.valence_smoothed = 0.0
+                human._update_action_feel()
+            self.assertIn("lifting your spirits",
+                          " ".join(human._experience_hints()))
+            human.memory.close()
+
+    def test_few_samples_teach_nothing_yet(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            human, _, _ = _human(tmp)
+            human._mood_at_action = ("work", 0.5)
+            human.body.valence_smoothed = 0.0
+            human._update_action_feel()
+            self.assertEqual(human._experience_hints(), [])
+            human.memory.close()
+
+    def test_action_feel_persists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            human, _, _ = _human(tmp)
+            human.action_feel = {"work": {"ema": -0.2, "n": 5}}
+            human.save()
+            human.memory.close()
+            reborn, _, _ = make_human(tmp)
+            self.assertEqual(reborn.action_feel["work"]["n"], 5)
+            reborn.memory.close()
+
+
+class TestHabits(unittest.TestCase):
+    def _dinner_at_19(self, human, times=6):
+        for _ in range(times):
+            human.body.sim_minutes = (human.body.sim_minutes // 1440) * 1440 + 19 * 60
+            human.body.sim_minutes += 1440  # next day, 19:00
+            human._record_routine("eat")
+
+    def test_repetition_builds_a_habit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            human, _, _ = _human(tmp)
+            self.assertEqual(human.habitual_hours("eat"), [])
+            self._dinner_at_19(human)
+            self.assertIn(19, human.habitual_hours("eat"))
+            human.memory.close()
+
+    def test_habit_hint_appears_at_the_usual_hour(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            human, _, _ = _human(tmp)
+            self._dinner_at_19(human)
+            human.body.sim_minutes = (human.body.sim_minutes // 1440) * 1440 + 19 * 60
+            human.body.satiety = 55.0
+            self.assertIn("usually eat", " ".join(human._habit_hints()))
+            # not hungry at all -> no nagging
+            human.body.satiety = 95.0
+            self.assertEqual([h for h in human._habit_hints() if "eat" in h], [])
+            # wrong time of day -> no hint either
+            human.body.satiety = 55.0
+            human.body.sim_minutes += 8 * 60   # 03:00
+            self.assertEqual([h for h in human._habit_hints() if "eat" in h], [])
+            human.memory.close()
+
+    def test_unreinforced_habits_fade(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            human, _, _ = _human(tmp)
+            human.routine = {"eat": [0.0] * 24}
+            human.routine["eat"][19] = 4.5
+            for _ in range(30):        # a month of never eating at 19:00
+                human._daily_checks()
+            self.assertEqual(human.habitual_hours("eat"), [])
+            human.memory.close()
+
+    def test_routine_persists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            human, _, _ = _human(tmp)
+            self._dinner_at_19(human)
+            human.save()
+            human.memory.close()
+            reborn, _, _ = make_human(tmp)
+            self.assertIn(19, reborn.habitual_hours("eat"))
+            reborn.memory.close()
+
+    def test_lived_days_produce_a_bedtime(self):
+        """Circadian-gated sleep means even the reflex brain settles into a
+        consistent, chronotype-true bedtime within ten days. (Meal times stay
+        need-driven — clock-regular meals come from the planning mind.)"""
+        with tempfile.TemporaryDirectory() as tmp:
+            human, _, _ = _human(tmp)
+            human.world.money = 500.0
+            for day in range(10):
+                for _ in range(288):
+                    human.tick(5.0)
+                human.restock()
+                if not human.body.alive:
+                    break
+            self.assertTrue(human.body.alive)
+            self.assertTrue(human.habitual_hours("sleep", min_count=3.0),
+                            "ten lived days should show a regular bedtime")
+            human.memory.close()
+
+
 if __name__ == "__main__":
     unittest.main()

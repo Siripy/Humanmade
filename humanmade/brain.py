@@ -263,7 +263,9 @@ class ReflexBrain:
 
     def decide(self, body, world) -> dict:
         if body.asleep:
-            if body.energy > 85:
+            # rested AND it's a reasonable hour — nobody gets up at 3am rested-ish
+            # (0.65 lets an average sleeper rise ~08:00; owls later, larks earlier)
+            if body.energy > 85 and body.circadian_sleep_drive() < 0.65:
                 return self._d("time to get up", "wake")
             return self._d("still sleeping", "idle", importance=1.0)
         rules: list[tuple[bool, str, str]] = [
@@ -274,7 +276,10 @@ class ReflexBrain:
              "eat", "I should eat something"),
             (body.satiety < 30, "drink", "starving, but the fridge is empty — "
                                          "water will have to do"),
-            (body.energy < 20, "sleep", "I can't keep my eyes open"),
+            # bedtime is circadian, not just exhaustion: at night the body is
+            # willing to turn in early; at midday only collapse sends it to bed
+            (body.energy < 20 + 18 * body.circadian_sleep_drive(),
+             "sleep", "I can't keep my eyes open"),
             (body.sickness > 50, "sleep", "I feel awful — I need to lie down"),
             (world.food_portions <= 1 and not world.can_afford(4)
              and body.energy > 30,

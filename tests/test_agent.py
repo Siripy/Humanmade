@@ -41,10 +41,13 @@ class ReflexLifeTest(unittest.TestCase):
             self.assertEqual(human.body.accidents, 0)
             self.assertLess(human.world.food_portions, 6)  # it ate
             self.assertGreater(human.memory.count(), 20)   # it remembers living
-            # it slept at least once and got up again
+            # it slept at least once and got up again (by choice, naturally,
+            # or dragged out of bed by a survival need — all count)
             acted = " ".join(events)
             self.assertIn("drifts off", acted)
-            self.assertIn("out of bed", acted)
+            self.assertTrue(any(w in acted for w in
+                                ("out of bed", "woke up naturally", "wakes up")),
+                            f"never woke: {acted[-400:]}")
             human.memory.close()
 
     def test_state_persists_across_restart(self):

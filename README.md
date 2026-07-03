@@ -140,6 +140,16 @@ a low `/speed` and it'll have a day's worth of life — and a dream — to recou
   slow-moving mood. Repeated pleasures dull (hedonic adaptation), comfort eating
   happens on bad days, and old trivial memories blur together into summaries the
   way real weeks do.
+- **It learns** — four ways. *Skills*: every meal, work session, and workout
+  practices cooking/craft/fitness on a power-law curve; skill genuinely matters (a
+  better cook gets more from a meal, mastery raises the wage and hobby speed,
+  fitness resists illness) and rusts with disuse. *Lessons*: give it advice it
+  trusts and it becomes a rule it lives by — persistent, deduplicated, and in front
+  of the mind at every decision. *Consequences*: it tracks how activities have
+  actually been leaving it feeling and notices patterns ("exercise has been leaving
+  you feeling worse lately"). *Habits*: repeated behavior at consistent hours
+  becomes its routine — a chronotype-true bedtime emerges within days, and `/habits`
+  shows what it has settled into.
 
 ## Research notes
 
@@ -192,6 +202,13 @@ The design borrows from actual human-behavior literature:
   decaying intensity, layered over mood.
 - **Hedonic adaptation** (Brickman & Campbell): repeated pleasures yield
   diminishing returns, pushing variety-seeking.
+- **Power law of practice** (Newell & Rosenbloom, 1981): skill gains are steep for
+  novices and slow toward mastery — the shape of every skill curve here.
+- **Law of effect** (Thorndike): actions followed by bad outcomes are noticed and
+  avoided — implemented as per-activity mood-outcome tracking surfaced to the mind.
+- **Habit formation** (Lally et al., 2010): behaviors repeated in stable contexts
+  become automatic over weeks — modeled as per-hour routine histograms that decay
+  without reinforcement, with circadian-gated sleep so bedtimes phase-lock.
 
 Sources: [Walker & van der Helm, "Overnight therapy?"](https://pubmed.ncbi.nlm.nih.gov/19702380/) ·
 [Berkeley News on REM and painful memories](https://news.berkeley.edu/2011/11/23/dream-sleep/) ·

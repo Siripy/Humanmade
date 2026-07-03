@@ -139,6 +139,12 @@ class Human:
             self.memory.get_meta("pending_question", "null"))
         # variety-seeking: recent leisure choices lose their shine
         self._recent_actions: list[str] = []
+        # consequence learning: how each activity has been leaving it feeling
+        self.action_feel: dict = json.loads(
+            self.memory.get_meta("action_feel", "{}"))
+        self._mood_at_action: tuple[str, float] | None = None
+        # habit formation: when it tends to do things (per-action hour counts)
+        self.routine: dict = json.loads(self.memory.get_meta("routine", "{}"))
 
         # the relationship itself develops (social penetration theory)
         self.bond = json.loads(self.memory.get_meta("bond", "null")) or {
@@ -211,6 +217,8 @@ class Human:
             self.memory.set_meta("bond", json.dumps(self.bond))
             self.memory.set_meta("pending_question",
                                  json.dumps(self.pending_question))
+            self.memory.set_meta("action_feel", json.dumps(self.action_feel))
+            self.memory.set_meta("routine", json.dumps(self.routine))
             if self.last_dream:
                 self.memory.set_meta("last_dream", self.last_dream)
 
@@ -447,6 +455,67 @@ class Human:
         elif "fever has broken" in e or "woke up naturally" in e:
             self._feel("relief", 0.5)
 
+    # ----------------------------------------------- learning from experience
+
+    TRACKED_FEELINGS = ("work", "exercise", "relax")   # deliberate activities
+    HABIT_ACTIONS = ("eat", "sleep", "shower", "work", "exercise")
+
+    def _update_action_feel(self) -> None:
+        """Instrumental learning, lightweight: how did the last activity
+        actually leave me feeling? (EMA of mood deltas per action.)"""
+        if not self._mood_at_action:
+            return
+        action, mood_before = self._mood_at_action
+        self._mood_at_action = None
+        if action not in self.TRACKED_FEELINGS:
+            return
+        delta = self.body.mood()[0] - mood_before
+        record = self.action_feel.setdefault(action, {"ema": 0.0, "n": 0})
+        record["ema"] = 0.7 * record["ema"] + 0.3 * delta
+        record["n"] += 1
+
+    def _experience_hints(self) -> list[str]:
+        """What experience has taught it, surfaced to the mind."""
+        hints = []
+        for action, record in self.action_feel.items():
+            if record["n"] >= 3 and abs(record["ema"]) > 0.04:
+                mood = ("has been leaving you feeling worse"
+                        if record["ema"] < 0 else "has been lifting your spirits")
+                hints.append(f"You've noticed that {action} {mood} lately.")
+        return hints[:2]
+
+    def _record_routine(self, action: str) -> None:
+        if action not in self.HABIT_ACTIONS:
+            return
+        buckets = self.routine.setdefault(action, [0.0] * 24)
+        buckets[int(self.body.hour) % 24] += 1.0
+
+    def habitual_hours(self, action: str, min_count: float = 4.0) -> list[int]:
+        """Hours at which this action has become routine (Lally: habits form
+        from repetition in a stable context)."""
+        buckets = self.routine.get(action, [])
+        if not buckets or max(buckets) < min_count:
+            return []
+        threshold = max(min_count, 0.6 * max(buckets))
+        return [h for h, count in enumerate(buckets) if count >= threshold]
+
+    def _habit_hints(self) -> list[str]:
+        b = self.body
+        if b.asleep:
+            return []
+        hints = []
+        hour = int(b.hour)
+
+        def near(hours: list[int]) -> bool:
+            return any(min(abs(hour - h), 24 - abs(hour - h)) <= 1
+                       for h in hours)
+
+        if b.satiety < 65 and near(self.habitual_hours("eat")):
+            hints.append("It's around the time you usually eat.")
+        if b.energy < 70 and near(self.habitual_hours("sleep")):
+            hints.append("It's getting on toward your usual bedtime.")
+        return hints
+
     # ----------------------------------------------------------------- skills
 
     def skill(self, name: str) -> float:
@@ -505,6 +574,11 @@ class Human:
         skills = self.persona.get("skills", {})
         for name, level in skills.items():
             skills[name] = max(1.0, float(level) - SKILL_DECAY_PER_DAY)
+
+        # routine drifts if not reinforced (habits fade without repetition)
+        for buckets in self.routine.values():
+            for i, count in enumerate(buckets):
+                buckets[i] = count * 0.97
 
         # old trivial days blur together (consolidation keeps memory human-sized)
         if self.body.day >= 8:
@@ -667,6 +741,8 @@ class Human:
         if lessons:
             lines.append("Rules you live by: "
                          + "; ".join(m.text for m in lessons))
+        lines += self._experience_hints()
+        lines += self._habit_hints()
         if self.world.weather == self.persona.get("loves_weather"):
             lines.append(f"It's {self.world.weather} — your favorite kind of sky.")
         elif self.world.weather == self.persona.get("hates_weather"):
@@ -748,6 +824,7 @@ class Human:
         """Snapshot perception and start deciding. Reflex decisions are instant;
         LLM decisions run on a worker thread and land on a later tick."""
         self.minutes_since_decision = 0.0
+        self._update_action_feel()
         perception = self._perception()
         heard = bool(self.inbox)
         self.inbox.clear()
@@ -1022,6 +1099,8 @@ class Human:
 
         self.current_action = action
         self.action_minutes_left = ACTION_DURATION.get(action, 20)
+        self._mood_at_action = (action, b.mood()[0])
+        self._record_routine(action)
         if narration:
             self.on_event(f"{self.persona['name']} {narration}.")
             self.memory.add("observation", f"I {narration}.", b.sim_minutes)
@@ -1114,6 +1193,9 @@ class Human:
             self._recent_actions.clear()
             self.emotion, self.emotion_intensity = None, 0.0
             self._evening_indulged = False
+            self.action_feel = {}
+            self.routine = {}
+            self._mood_at_action = None
             self.memory.set_meta("persona", json.dumps(self.persona))
             self.memory.add("event", f"{self.persona['name']} came into existence.",
                             self.body.sim_minutes, importance=10)

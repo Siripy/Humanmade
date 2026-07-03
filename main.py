@@ -12,8 +12,8 @@ Commands:
   /away          tell it you're leaving (it waits; type anything to return)
   /plan          see today's plan        /dream        recall last night's dream
   /journal [n]   read its diary          /medicine     order medicine when sick
-  /bond          how it feels about you  /newlife      start a new person
-  /quit          save and exit
+  /bond          how it feels about you  /habits       its learned routine
+  /newlife       start a new person     /quit          save and exit
 """
 
 import json
@@ -199,6 +199,22 @@ def main() -> None:
                         known = human.memory.recent(8, kinds=("companion",))
                         for m in known:
                             print(f"  knows: {m.text}")
+            elif line == "/habits":
+                with print_lock:
+                    with human.lock:
+                        any_habit = False
+                        for act in human.HABIT_ACTIONS:
+                            hours = human.habitual_hours(act)
+                            if hours:
+                                any_habit = True
+                                times = ", ".join(f"{h:02d}:00-ish" for h in hours)
+                                print(f"  usually {act}s around {times}")
+                        feels = human._experience_hints()
+                        for f in feels:
+                            print(f"  {f}")
+                        if not any_habit and not feels:
+                            print(f"{name} hasn't settled into a routine yet — "
+                                  "habits take days of repetition to form.")
             elif line == "/newlife":
                 if human.body.alive:
                     print(f"{name} is still alive. This only works after death.")
