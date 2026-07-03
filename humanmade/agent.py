@@ -113,6 +113,14 @@ class Human:
         self.pending_news: list[str] = []   # things saved up to tell you on return
         self._reunion_gap: float | None = None  # sim-min apart, set on return
 
+        # the relationship itself develops (social penetration theory)
+        self.bond = json.loads(self.memory.get_meta("bond", "null")) or {
+            "trust": 40.0, "closeness": 20.0,
+            "first_met_sim": self.body.sim_minutes,
+            "last_anniversary_days": 0.0,
+        }
+        self._last_day = self.body.day
+
         # in-flight cognition (see module docstring)
         self._life_id = 0
         self._think_seq = 0
@@ -167,10 +175,21 @@ class Human:
             self.memory.set_meta("persona", json.dumps(self.persona))
             self.memory.set_meta("plan", json.dumps(self.today_plan))
             self.memory.set_meta("plan_day", str(self.plan_day_index))
+            self.memory.set_meta("bond", json.dumps(self.bond))
             if self.last_dream:
                 self.memory.set_meta("last_dream", self.last_dream)
 
     # ------------------------------------------------------- companion inputs
+
+    def _bond_adjust(self, trust: float = 0.0, closeness: float = 0.0) -> None:
+        self.bond["trust"] = max(0.0, min(100.0, self.bond["trust"] + trust))
+        self.bond["closeness"] = max(0.0, min(100.0, self.bond["closeness"] + closeness))
+
+    def bond_level(self) -> str:
+        c = self.bond["closeness"]
+        return "strangers, really" if c < 15 else \
+               "acquaintances" if c < 35 else \
+               "friends" if c < 65 else "genuinely close"
 
     def hear(self, text: str) -> None:
         """Companion said something; the human will notice on its next thought.
@@ -185,10 +204,14 @@ class Human:
                 self._reunion_gap = gap
                 # the relief of reunion is a genuine mood jolt
                 self.body.nudge_mood(min(0.4, gap / 6000))
+                self._bond_adjust(closeness=1.5)
+                if gap > 48 * 60:   # abandoned for days — it noticed
+                    self._bond_adjust(trust=-3.0, closeness=-1.0)
             self.companion_present = True
             self.last_seen_sim = self.body.sim_minutes
             self.inbox.append(text)
             self.body.social = min(100.0, self.body.social + 18)
+            self._bond_adjust(closeness=0.4)
             self.memory.add("conversation", f"Companion said: \"{text}\"",
                             self.body.sim_minutes)
             self.minutes_since_decision = 10 ** 6  # answer promptly
@@ -212,6 +235,7 @@ class Human:
         with self.lock:
             bought = self.world.restock(portions)
             if bought > 0:
+                self._bond_adjust(trust=2.5)
                 self.memory.add("event",
                                 f"My companion ordered groceries — {bought} portions, "
                                 f"paid from my credits ({self.world.money:.0f} left).",
@@ -235,6 +259,7 @@ class Human:
                                 importance=7)
                 return {"ok": False, "reason": "broke", "money": self.world.money}
             self.body.take_medicine()
+            self._bond_adjust(trust=5.0, closeness=2.0)  # they took care of me
             self.memory.add("event", "My companion ordered medicine for me. "
                             "I already feel it working.", self.body.sim_minutes,
                             importance=7)
@@ -283,6 +308,10 @@ class Human:
                 return
 
             self._handle_sleep_transitions()
+
+            if self.body.day != self._last_day:
+                self._last_day = self.body.day
+                self._daily_checks()
 
             self.action_minutes_left -= sim_minutes
             self.minutes_since_decision += sim_minutes
@@ -338,6 +367,23 @@ class Human:
             return self.llm.embed([query])[0]
         except BrainError:
             return None
+
+    # ------------------------------------------------------------ daily rhythm
+
+    ANNIVERSARIES = (7, 30, 60, 90, 180, 365)
+
+    def _daily_checks(self) -> None:
+        """Things a human notices at the turn of a day."""
+        days_known = (self.body.sim_minutes - self.bond["first_met_sim"]) / 1440
+        last = self.bond.get("last_anniversary_days", 0.0)
+        for milestone in self.ANNIVERSARIES:
+            if last < milestone <= days_known:
+                self.bond["last_anniversary_days"] = float(milestone)
+                self.memory.add(
+                    "event", f"My companion and I have known each other "
+                    f"{milestone} days now. Strange and nice to count it.",
+                    self.body.sim_minutes, importance=8)
+                self._note_news(f"realized it's been {milestone} days since we met")
 
     # --------------------------------------------------------- sleep & dreams
 
@@ -498,9 +544,24 @@ class Human:
         return "\n".join(lines)
 
     def _social_context(self) -> list[str]:
-        """Presence, separation, and reunion — the attachment layer."""
+        """Presence, separation, reunion, and the state of the bond."""
         b = self.body
         lines: list[str] = []
+        days_known = (b.sim_minutes - self.bond["first_met_sim"]) / 1440
+        level = self.bond_level()
+        guidance = {
+            "strangers, really": "Keep some guard up — small talk and light questions.",
+            "acquaintances": "You can share opinions and everyday feelings.",
+            "friends": "You can be honest about how you feel and ask personal things.",
+            "genuinely close": "You trust them deeply — share what's really on your mind.",
+        }[level]
+        lines.append(f"You've known your companion {days_known:.0f} days "
+                     f"(trust {self.bond['trust']:.0f}/100, closeness "
+                     f"{self.bond['closeness']:.0f}/100 — {level}). {guidance}")
+        known = self.memory.recent(5, kinds=("companion",))
+        if known:
+            lines.append("What you know about them: "
+                         + "; ".join(m.text for m in known))
         if self._reunion_gap is not None:
             gap_h = self._reunion_gap / 60.0
             span = (f"{gap_h:.1f} hours" if gap_h >= 1 else
@@ -646,6 +707,15 @@ class Human:
                             importance=decision["importance"])
             if self.on_thought:
                 self.on_thought(decision["thought"])
+
+        note = decision.get("note_about_companion")
+        if note:
+            existing = {m.text.lower() for m in self.memory.recent(
+                12, kinds=("companion",))}
+            if note.lower() not in existing:
+                self.memory.add("companion", note, self.body.sim_minutes,
+                                importance=7)
+                self._bond_adjust(closeness=1.0)  # learning someone = closeness
 
         if decision["say"]:
             if self.companion_present:
@@ -818,6 +888,10 @@ class Human:
             self.last_seen_sim = self.body.sim_minutes
             self.pending_news.clear()
             self._reunion_gap = None
+            self.bond = {"trust": 40.0, "closeness": 20.0,
+                         "first_met_sim": self.body.sim_minutes,
+                         "last_anniversary_days": 0.0}
+            self._last_day = self.body.day
             self.memory.set_meta("persona", json.dumps(self.persona))
             self.memory.add("event", f"{self.persona['name']} came into existence.",
                             self.body.sim_minutes, importance=10)

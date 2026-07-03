@@ -12,7 +12,8 @@ Commands:
   /away          tell it you're leaving (it waits; type anything to return)
   /plan          see today's plan        /dream        recall last night's dream
   /journal [n]   read its diary          /medicine     order medicine when sick
-  /newlife       start a new person     /quit          save and exit
+  /bond          how it feels about you  /newlife      start a new person
+  /quit          save and exit
 """
 
 import json
@@ -186,6 +187,18 @@ def main() -> None:
                 else:
                     out(f"{C_EVENT}· the pharmacy declined — {name} can't afford "
                         f"medicine ({r['money']:.0f} credits){C_RESET}")
+            elif line == "/bond":
+                with print_lock:
+                    with human.lock:
+                        days = (human.body.sim_minutes
+                                - human.bond["first_met_sim"]) / 1440
+                        print(f"{name} has known you {days:.1f} days — "
+                              f"trust {human.bond['trust']:.0f}/100, closeness "
+                              f"{human.bond['closeness']:.0f}/100 "
+                              f"({human.bond_level()})")
+                        known = human.memory.recent(8, kinds=("companion",))
+                        for m in known:
+                            print(f"  knows: {m.text}")
             elif line == "/newlife":
                 if human.body.alive:
                     print(f"{name} is still alive. This only works after death.")

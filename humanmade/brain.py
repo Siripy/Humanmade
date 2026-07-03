@@ -48,6 +48,7 @@ Respond ONLY with a single JSON object, no other text:
 {{"thought": "<your private inner monologue, 1-2 sentences>",
   "action": "<one of: {actions}>",
   "say": "<words spoken aloud to your companion, or null to stay silent>",
+  "note_about_companion": "<a NEW fact you just learned about your companion worth remembering, or null>",
   "importance": <1-10, how memorable this moment is>}}"""
 
 
@@ -229,9 +230,12 @@ def _parse_decision(raw: str) -> dict:
     action = str(data.get("action", "idle")).lower().strip()
     if action not in ACTIONS:
         action = "idle"
-    say = data.get("say")
-    if isinstance(say, str) and say.strip().lower() in ("", "null", "none"):
-        say = None
+
+    def _clean(value):
+        if isinstance(value, str) and value.strip().lower() not in ("", "null", "none"):
+            return value
+        return None
+
     try:
         importance = float(data.get("importance", 3))
     except (TypeError, ValueError):
@@ -239,7 +243,8 @@ def _parse_decision(raw: str) -> dict:
     return {
         "thought": str(data.get("thought", "")).strip(),
         "action": action,
-        "say": say if isinstance(say, str) else None,
+        "say": _clean(data.get("say")),
+        "note_about_companion": _clean(data.get("note_about_companion")),
         "importance": max(1.0, min(10.0, importance)),
     }
 
@@ -283,4 +288,4 @@ class ReflexBrain:
     @staticmethod
     def _d(thought: str, action: str, importance: float = 2.0) -> dict:
         return {"thought": thought, "action": action, "say": None,
-                "importance": importance}
+                "note_about_companion": None, "importance": importance}
